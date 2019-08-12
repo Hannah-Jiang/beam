@@ -15,12 +15,25 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.beam.runners.fnexecution.jobsubmission;
+package org.apache.beam.sdk.extensions.sql.meta.provider.kafka;
 
-import org.apache.beam.model.pipeline.v1.RunnerApi;
-import org.apache.beam.runners.fnexecution.provisioning.JobInfo;
+import com.google.auto.value.AutoValue;
+import java.io.Serializable;
 
-/** Runs a portable Beam pipeline on some execution engine. */
-public interface PortablePipelineRunner {
-  PortablePipelineResult run(RunnerApi.Pipeline pipeline, JobInfo jobInfo) throws Exception;
+/** This class is created because Kafka Consumer Records are not serializable. */
+@AutoValue
+public abstract class KafkaTestRecord implements Serializable {
+
+  public abstract String getKey();
+
+  public abstract String getValue();
+
+  public abstract String getTopic();
+
+  public abstract long getTimeStamp();
+
+  public static KafkaTestRecord create(
+      String newKey, String newValue, String newTopic, long newTimeStamp) {
+    return new AutoValue_KafkaTestRecord(newKey, newValue, newTopic, newTimeStamp);
+  }
 }
