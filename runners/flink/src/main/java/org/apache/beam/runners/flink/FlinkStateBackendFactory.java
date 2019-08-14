@@ -15,24 +15,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+package org.apache.beam.runners.flink;
 
-plugins { id 'org.apache.beam.module' }
-applyJavaNature(exportJavadoc: false)
+import org.apache.flink.runtime.state.StateBackend;
 
-description = "Apache Beam :: SDKs :: Java :: Extensions :: Euphoria Java 8 DSL"
-
-dependencies {
-  compile project(path: ":sdks:java:core", configuration: "shadow")
-  testCompile library.java.mockito_core
-  testCompile project(":sdks:java:extensions:kryo")
-  testCompile library.java.slf4j_api
-  testCompile library.java.hamcrest_core
-  testCompile library.java.hamcrest_library
-  testCompile library.java.mockito_core
-  testCompile project(path: ":sdks:java:core", configuration: "shadowTest")
-  testRuntimeOnly project(":runners:direct-java")
-}
-
-test {
-  jvmArgs '-Dsun.io.serialization.extendedDebugInfo=true'
+/** Constructs a StateBackend to use from flink pipeline options. */
+public interface FlinkStateBackendFactory {
+  StateBackend createStateBackend(FlinkPipelineOptions options);
 }
