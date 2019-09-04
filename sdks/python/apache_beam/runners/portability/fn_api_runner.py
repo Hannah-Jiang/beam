@@ -1264,8 +1264,8 @@ class ExternalWorkerHandler(GrpcWorkerHandler):
     stub = beam_fn_api_pb2_grpc.BeamFnExternalWorkerPoolStub(
         GRPCChannelFactory.insecure_channel(
             self._external_payload.endpoint.url))
-    response = stub.NotifyRunnerAvailable(
-        beam_fn_api_pb2.NotifyRunnerAvailableRequest(
+    response = stub.StartWorker(
+        beam_fn_api_pb2.StartWorkerRequest(
             worker_id=self.worker_id,
             control_endpoint=endpoints_pb2.ApiServiceDescriptor(
                 url=self.control_address),
@@ -1351,24 +1351,25 @@ class DockerSdkWorkerHandler(GrpcWorkerHandler):
            '--provision_endpoint=%s' % self.control_address,
           ]).strip()
       while True:
-        logging.info('Waiting for docker to start up...')
         status = subprocess.check_output([
             'docker',
             'inspect',
             '-f',
             '{{.State.Status}}',
             self._container_id]).strip()
-        if status == 'running':
+        logging.info('Waiting for docker to start up.Current status is %s' %
+                     status)
+        if status == b'running':
           logging.info('Docker container is running. container_id = %s, '
                        'worker_id = %s', self._container_id, self.worker_id)
           break
-        elif status in ('dead', 'exited'):
+        elif status in (b'dead', b'exited'):
           subprocess.call([
               'docker',
               'container',
               'logs',
               self._container_id])
-          raise RuntimeError('SDK failed to start.')
+          raise RuntimeError('SDK failed to start. Final status is %s' % status)
       time.sleep(1)
 
   def stop_worker(self):
