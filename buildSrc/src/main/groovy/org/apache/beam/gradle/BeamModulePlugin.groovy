@@ -337,7 +337,7 @@ class BeamModulePlugin implements Plugin<Project> {
 
     // Automatically use the official release version if we are performing a release
     // otherwise append '-SNAPSHOT'
-    project.version = '2.16.0'
+    project.version = '2.17.0'
     if (!isRelease(project)) {
       project.version += '-SNAPSHOT'
     }
@@ -526,7 +526,7 @@ class BeamModulePlugin implements Plugin<Project> {
         jackson_datatype_joda                       : "com.fasterxml.jackson.datatype:jackson-datatype-joda:$jackson_version",
         jackson_module_scala                        : "com.fasterxml.jackson.module:jackson-module-scala_2.11:$jackson_version",
         jaxb_api                                    : "javax.xml.bind:jaxb-api:$jaxb_api_version",
-        joda_time                                   : "joda-time:joda-time:2.10.1",
+        joda_time                                   : "joda-time:joda-time:2.10.3",
         junit                                       : "junit:junit:4.13-beta-3",
         kafka                                       : "org.apache.kafka:kafka_2.11:$kafka_version",
         kafka_clients                               : "org.apache.kafka:kafka-clients:$kafka_version",
@@ -1478,9 +1478,10 @@ class BeamModulePlugin implements Plugin<Project> {
     }
 
     // containerImageName returns a configurable container image name, by default a
-    // development image at bintray.io (see sdks/CONTAINERS.md):
+    // development image at docker.io (see sdks/CONTAINERS.md):
     //
-    //     $USER-docker-apache.bintray.io/beam/$NAME:latest
+    //     format: apachebeam/$NAME_sdk:latest
+    //     ie: apachebeam/python2.7_sdk:latest apachebeam/java_sdk:latest apachebeam/go_sdk:latest
     //
     // Both the root and tag can be defined using properties or explicitly provided.
     project.ext.containerImageName = {
@@ -1491,7 +1492,7 @@ class BeamModulePlugin implements Plugin<Project> {
         if (project.rootProject.hasProperty(["docker-repository-root"])) {
           configuration.root = project.rootProject["docker-repository-root"]
         } else {
-          configuration.root = "${System.properties["user.name"]}-docker-apache.bintray.io/beam"
+          configuration.root = "apachebeam"
         }
       }
       if (configuration.tag == null) {

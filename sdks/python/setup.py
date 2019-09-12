@@ -129,6 +129,12 @@ REQUIRED_PACKAGES = [
     'typing>=3.6.0,<3.7.0; python_version < "3.5.0"',
     ]
 
+# [BEAM-8181] pyarrow cannot be installed on 32-bit Windows platforms.
+if sys.platform == 'win32' and sys.maxsize <= 2**32:
+  REQUIRED_PACKAGES = [
+      p for p in REQUIRED_PACKAGES if not p.startswith('pyarrow')
+  ]
+
 REQUIRED_TEST_PACKAGES = [
     'nose>=1.3.7',
     'nose_xunitmp>=0.4.1',
@@ -147,11 +153,11 @@ GCP_REQUIREMENTS = [
     # [BEAM-4543] googledatastore is not supported in Python 3.
     'googledatastore>=7.0.1,<7.1; python_version < "3.0"',
     'google-cloud-datastore>=1.7.1,<1.8.0',
-    'google-cloud-pubsub>=0.39.0,<0.40.0',
+    'google-cloud-pubsub>=0.39.0,<1.1.0',
     # GCP packages required by tests
     'google-cloud-bigquery>=1.6.0,<1.18.0',
     'google-cloud-core>=0.28.1,<2',
-    'google-cloud-bigtable>=0.31.1,<0.33.0',
+    'google-cloud-bigtable>=0.31.1,<1.1.0',
 ]
 
 
@@ -174,10 +180,10 @@ def generate_protos_first(original_cmd):
 
 python_requires = '>=2.7,!=3.0.*,!=3.1.*,!=3.2.*,!=3.3.*,!=3.4.*'
 
-if sys.version_info[0] == 3:
+if sys.version_info[0] == 2:
   warnings.warn(
-      'Some syntactic constructs of Python 3 are not yet fully supported by '
-      'Apache Beam.')
+      'You are using Apache Beam with Python 2. '
+      'New releases of Apache Beam will soon support Python 3 only.')
 
 setuptools.setup(
     name=PACKAGE_NAME,
