@@ -32,13 +32,11 @@ import warnings
 
 import pkg_resources
 
-# TODO(BEAM-5414): latest grpcio-tools incompatible with latest protobuf 3.6.1.
-GRPC_TOOLS = 'grpcio-tools>=1.3.5,<=1.14.2'
-
 BEAM_PROTO_PATHS = [
     os.path.join('..', '..', 'model', 'pipeline', 'src', 'main', 'proto'),
     os.path.join('..', '..', 'model', 'job-management', 'src', 'main', 'proto'),
     os.path.join('..', '..', 'model', 'fn-execution', 'src', 'main', 'proto'),
+    os.path.join('..', '..', 'model', 'interactive', 'src', 'main', 'proto'),
 ]
 
 PYTHON_OUTPUT_PATH = os.path.join('apache_beam', 'portability', 'api')
@@ -52,7 +50,7 @@ MODEL_RESOURCES = [
 def generate_proto_files(force=False, log=None):
 
   try:
-    import grpc_tools  # pylint: disable=unused-variable
+    import grpc_tools  # pylint: disable=unused-import
   except ImportError:
     warnings.warn('Installing grpcio-tools is recommended for development.')
 
@@ -122,7 +120,6 @@ def generate_proto_files(force=False, log=None):
       if p.exitcode:
         raise ValueError("Proto generation failed (see log for details).")
     else:
-
       log.info('Regenerating Python proto definitions (%s).' % regenerate)
       builtin_protos = pkg_resources.resource_filename('grpc_tools', '_proto')
       args = (
@@ -162,8 +159,8 @@ def generate_proto_files(force=False, log=None):
 # directory and add it to the path as needed.
 # See https://github.com/pypa/setuptools/issues/377
 def _install_grpcio_tools_and_generate_proto_files():
-  install_path = os.path.join(
-      os.path.dirname(os.path.abspath(__file__)), '.eggs', 'grpcio-wheels')
+  py_sdk_root = os.path.dirname(os.path.abspath(__file__))
+  install_path = os.path.join(py_sdk_root, '.eggs', 'grpcio-wheels')
   build_path = install_path + '-build'
   if os.path.exists(build_path):
     shutil.rmtree(build_path)
@@ -173,7 +170,8 @@ def _install_grpcio_tools_and_generate_proto_files():
     subprocess.check_call(
         [sys.executable, '-m', 'pip', 'install',
          '--target', install_path, '--build', build_path,
-         '--upgrade', GRPC_TOOLS])
+         '--upgrade',
+         '-r', os.path.join(py_sdk_root, 'build-requirements.txt')])
     logging.warning(
         'Installing grpcio-tools took %0.2f seconds.', time.time() - start)
   finally:

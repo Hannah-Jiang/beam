@@ -50,6 +50,8 @@ import java.util.Map;
 import java.util.Set;
 import org.apache.beam.model.pipeline.v1.RunnerApi;
 import org.apache.beam.model.pipeline.v1.RunnerApi.Components;
+import org.apache.beam.model.pipeline.v1.RunnerApi.DockerPayload;
+import org.apache.beam.model.pipeline.v1.RunnerApi.Environment;
 import org.apache.beam.model.pipeline.v1.RunnerApi.ParDoPayload;
 import org.apache.beam.runners.core.construction.PTransformTranslation;
 import org.apache.beam.runners.core.construction.ParDoTranslation;
@@ -734,8 +736,8 @@ public class DataflowPipelineTranslatorTest implements Serializable {
   @Test
   public void testSplittableParDoTranslationFnApi() throws Exception {
     DataflowPipelineOptions options = buildPipelineOptions();
-    DataflowRunner runner = DataflowRunner.fromOptions(options);
     options.setExperiments(Arrays.asList("beam_fn_api"));
+    DataflowRunner runner = DataflowRunner.fromOptions(options);
     DataflowPipelineTranslator translator = DataflowPipelineTranslator.fromOptions(options);
 
     Pipeline pipeline = Pipeline.create(options);
@@ -850,6 +852,66 @@ public class DataflowPipelineTranslatorTest implements Serializable {
   }
 
   @Test
+  public void testToSingletonTranslationWithFnApiSideInput() throws Exception {
+    // A "change detector" test that makes sure the translation
+    // of getting a PCollectionView<T> does not change
+    // in bad ways during refactor
+
+    DataflowPipelineOptions options = buildPipelineOptions();
+    options.setExperiments(Arrays.asList("beam_fn_api"));
+    DataflowPipelineTranslator translator = DataflowPipelineTranslator.fromOptions(options);
+
+    Pipeline pipeline = Pipeline.create(options);
+    pipeline.apply(Create.of(1)).apply(View.asSingleton());
+    DataflowRunner runner = DataflowRunner.fromOptions(options);
+    runner.replaceTransforms(pipeline);
+    Job job = translator.translate(pipeline, runner, Collections.emptyList()).getJob();
+    assertAllStepOutputsHaveUniqueIds(job);
+
+    List<Step> steps = job.getSteps();
+    assertEquals(14, steps.size());
+
+    Step collectionToSingletonStep = steps.get(steps.size() - 1);
+    assertEquals("CollectionToSingleton", collectionToSingletonStep.getKind());
+
+    @SuppressWarnings("unchecked")
+    List<Map<String, Object>> ctsOutputs =
+        (List<Map<String, Object>>)
+            steps.get(steps.size() - 1).getProperties().get(PropertyNames.OUTPUT_INFO);
+    assertTrue(Structs.getBoolean(Iterables.getOnlyElement(ctsOutputs), "use_indexed_format"));
+  }
+
+  @Test
+  public void testToIterableTranslationWithFnApiSideInput() throws Exception {
+    // A "change detector" test that makes sure the translation
+    // of getting a PCollectionView<Iterable<T>> does not change
+    // in bad ways during refactor
+
+    DataflowPipelineOptions options = buildPipelineOptions();
+    options.setExperiments(Arrays.asList("beam_fn_api"));
+    DataflowPipelineTranslator translator = DataflowPipelineTranslator.fromOptions(options);
+
+    Pipeline pipeline = Pipeline.create(options);
+    pipeline.apply(Create.of(1, 2, 3)).apply(View.asIterable());
+
+    DataflowRunner runner = DataflowRunner.fromOptions(options);
+    runner.replaceTransforms(pipeline);
+    Job job = translator.translate(pipeline, runner, Collections.emptyList()).getJob();
+    assertAllStepOutputsHaveUniqueIds(job);
+
+    List<Step> steps = job.getSteps();
+    assertEquals(10, steps.size());
+
+    @SuppressWarnings("unchecked")
+    List<Map<String, Object>> ctsOutputs =
+        (List<Map<String, Object>>)
+            steps.get(steps.size() - 1).getProperties().get(PropertyNames.OUTPUT_INFO);
+    assertTrue(Structs.getBoolean(Iterables.getOnlyElement(ctsOutputs), "use_indexed_format"));
+    Step collectionToSingletonStep = steps.get(steps.size() - 1);
+    assertEquals("CollectionToSingleton", collectionToSingletonStep.getKind());
+  }
+
+  @Test
   public void testStepDisplayData() throws Exception {
     DataflowPipelineOptions options = buildPipelineOptions();
     DataflowPipelineTranslator translator = DataflowPipelineTranslator.fromOptions(options);
@@ -954,6 +1016,34 @@ public class DataflowPipelineTranslatorTest implements Serializable {
 
     assertEquals(expectedFn1DisplayData, ImmutableSet.copyOf(fn1displayData));
     assertEquals(expectedFn2DisplayData, ImmutableSet.copyOf(fn2displayData));
+  }
+
+  /**
+   * Tests that when {@link DataflowPipelineOptions#setWorkerHarnessContainerImage(String)} pipeline
+   * option is set, {@link DataflowRunner} sets that value as the {@link
+   * DockerPayload#getContainerImage()} of the default {@link Environment} used when generating the
+   * model pipeline proto.
+   */
+  @Test
+  public void testSetWorkerHarnessContainerImageInPipelineProto() throws Exception {
+    DataflowPipelineOptions options = buildPipelineOptions();
+    String containerImage = "gcr.io/IMAGE/foo";
+    options.as(DataflowPipelineOptions.class).setWorkerHarnessContainerImage(containerImage);
+
+    JobSpecification specification =
+        DataflowPipelineTranslator.fromOptions(options)
+            .translate(
+                Pipeline.create(options),
+                DataflowRunner.fromOptions(options),
+                Collections.emptyList());
+    RunnerApi.Pipeline pipelineProto = specification.getPipelineProto();
+
+    assertEquals(1, pipelineProto.getComponents().getEnvironmentsCount());
+    Environment defaultEnvironment =
+        Iterables.getOnlyElement(pipelineProto.getComponents().getEnvironmentsMap().values());
+
+    DockerPayload payload = DockerPayload.parseFrom(defaultEnvironment.getPayload());
+    assertEquals(DataflowRunner.getContainerImageForJob(options), payload.getContainerImage());
   }
 
   private static void assertAllStepOutputsHaveUniqueIds(Job job) throws Exception {

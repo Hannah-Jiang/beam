@@ -26,12 +26,16 @@ import unittest
 
 import hamcrest as hc
 from future.builtins import range
+from nose.plugins.attrib import attr
 
 import apache_beam as beam
 import apache_beam.transforms.combiners as combine
+from apache_beam.options.pipeline_options import PipelineOptions
 from apache_beam.testing.test_pipeline import TestPipeline
+from apache_beam.testing.test_stream import TestStream
 from apache_beam.testing.util import assert_that
 from apache_beam.testing.util import equal_to
+from apache_beam.testing.util import equal_to_per_window
 from apache_beam.transforms import window
 from apache_beam.transforms.core import CombineGlobally
 from apache_beam.transforms.core import Create
@@ -39,7 +43,9 @@ from apache_beam.transforms.core import Map
 from apache_beam.transforms.display import DisplayData
 from apache_beam.transforms.display_test import DisplayDataItemMatcher
 from apache_beam.transforms.ptransform import PTransform
+from apache_beam.transforms.window import TimestampCombiner
 from apache_beam.typehints import TypeCheckError
+from apache_beam.utils.timestamp import Timestamp
 
 
 class CombineTest(unittest.TestCase):
@@ -393,6 +399,90 @@ class CombineTest(unittest.TestCase):
           | beam.CombineGlobally(combine.MeanCombineFn()).with_fanout(11))
       assert_that(result, equal_to([49.5]))
 
+  def test_MeanCombineFn_combine(self):
+    with TestPipeline() as p:
+      input = (p
+               | beam.Create([('a', 1),
+                              ('a', 1),
+                              ('a', 4),
+                              ('b', 1),
+                              ('b', 13)]))
+      # The mean of all values regardless of key.
+      global_mean = (input
+                     | beam.Values()
+                     | beam.CombineGlobally(combine.MeanCombineFn()))
+
+      # The (key, mean) pairs for all keys.
+      mean_per_key = (input | beam.CombinePerKey(combine.MeanCombineFn()))
+
+      expected_mean_per_key = [('a', 2), ('b', 7)]
+      assert_that(global_mean, equal_to([4]), label='global mean')
+      assert_that(mean_per_key, equal_to(expected_mean_per_key),
+                  label='mean per key')
+
+  def test_MeanCombineFn_combine_empty(self):
+    # For each element in a PCollection, if it is float('NaN'), then emits
+    # a string 'NaN', otherwise emits str(element).
+
+    with TestPipeline() as p:
+      input = (p | beam.Create([]))
+
+      # Compute the mean of all values in the PCollection,
+      # then format the mean. Since the Pcollection is empty,
+      # the mean is float('NaN'), and is formatted to be a string 'NaN'.
+      global_mean = (input
+                     | beam.Values()
+                     | beam.CombineGlobally(combine.MeanCombineFn())
+                     | beam.Map(str))
+
+      mean_per_key = (input | beam.CombinePerKey(combine.MeanCombineFn()))
+
+      # We can't compare one float('NaN') with another float('NaN'),
+      # but we can compare one 'nan' string with another string.
+      assert_that(global_mean, equal_to(['nan']), label='global mean')
+      assert_that(mean_per_key, equal_to([]), label='mean per key')
+
+  def test_sessions_combine(self):
+    with TestPipeline() as p:
+      input = (
+          p
+          | beam.Create([('c', 1), ('c', 9), ('c', 12), ('d', 2), ('d', 4)])
+          | beam.MapTuple(lambda k, v: window.TimestampedValue((k, v), v))
+          | beam.WindowInto(window.Sessions(4)))
+
+      global_sum = (input
+                    | beam.Values()
+                    | beam.CombineGlobally(sum).without_defaults())
+      sum_per_key = input | beam.CombinePerKey(sum)
+
+      # The first window has 3 elements: ('c', 1), ('d', 2), ('d', 4).
+      # The second window has 2 elements: ('c', 9), ('c', 12).
+      assert_that(global_sum, equal_to([7, 21]), label='global sum')
+      assert_that(sum_per_key, equal_to([('c', 1), ('c', 21), ('d', 6)]),
+                  label='sum per key')
+
+  def test_fixed_windows_combine(self):
+    with TestPipeline() as p:
+      input = (
+          p
+          | beam.Create([('c', 1), ('c', 2), ('c', 10),
+                         ('d', 5), ('d', 8), ('d', 9)])
+          | beam.MapTuple(lambda k, v: window.TimestampedValue((k, v), v))
+          | beam.WindowInto(window.FixedWindows(4)))
+
+      global_sum = (input
+                    | beam.Values()
+                    | beam.CombineGlobally(sum).without_defaults())
+      sum_per_key = input | beam.CombinePerKey(sum)
+
+      # The first window has 2 elements: ('c', 1), ('c', 2).
+      # The second window has 1 elements: ('d', 5).
+      # The third window has 3 elements: ('c', 10), ('d', 8), ('d', 9).
+      assert_that(global_sum, equal_to([3, 5, 27]), label='global sum')
+      assert_that(sum_per_key,
+                  equal_to([('c', 3), ('c', 10), ('d', 5), ('d', 17)]),
+                  label='sum per key')
+
 
 class LatestTest(unittest.TestCase):
 
@@ -480,6 +570,73 @@ class LatestCombineFnTest(unittest.TestCase):
         pc = p | Create(l_3_tuple)
         _ = pc | beam.CombineGlobally(self.fn)
 
+#
+# Test cases for streaming.
+#
+@attr('ValidatesRunner')
+class TimestampCombinerTest(unittest.TestCase):
+
+  def test_combiner_earliest(self):
+    """Test TimestampCombiner with EARLIEST."""
+    options = PipelineOptions(streaming=True)
+    with TestPipeline(options=options) as p:
+      result = (p
+                | TestStream()
+                .add_elements([window.TimestampedValue(('k', 100), 2)])
+                .add_elements([window.TimestampedValue(('k', 400), 7)])
+                .advance_watermark_to_infinity()
+                | beam.WindowInto(
+                    window.FixedWindows(10),
+                    timestamp_combiner=TimestampCombiner.OUTPUT_AT_EARLIEST)
+                | beam.CombinePerKey(sum))
+
+      records = (result
+                 | beam.Map(lambda e, ts=beam.DoFn.TimestampParam: (e, ts)))
+
+      # All the KV pairs are applied GBK using EARLIEST timestamp for the same
+      # key.
+      expected_window_to_elements = {
+          window.IntervalWindow(0, 10): [
+              (('k', 500), Timestamp(2)),
+          ],
+      }
+
+      assert_that(
+          records,
+          equal_to_per_window(expected_window_to_elements),
+          use_global_window=False,
+          label='assert per window')
+
+  def test_combiner_latest(self):
+    """Test TimestampCombiner with LATEST."""
+    options = PipelineOptions(streaming=True)
+    with TestPipeline(options=options) as p:
+      result = (p
+                | TestStream()
+                .add_elements([window.TimestampedValue(('k', 100), 2)])
+                .add_elements([window.TimestampedValue(('k', 400), 7)])
+                .advance_watermark_to_infinity()
+                | beam.WindowInto(
+                    window.FixedWindows(10),
+                    timestamp_combiner=TimestampCombiner.OUTPUT_AT_LATEST)
+                | beam.CombinePerKey(sum))
+
+      records = (result
+                 | beam.Map(lambda e, ts=beam.DoFn.TimestampParam: (e, ts)))
+
+      # All the KV pairs are applied GBK using LATEST timestamp for
+      # the same key.
+      expected_window_to_elements = {
+          window.IntervalWindow(0, 10): [
+              (('k', 500), Timestamp(7)),
+          ],
+      }
+
+      assert_that(
+          records,
+          equal_to_per_window(expected_window_to_elements),
+          use_global_window=False,
+          label='assert per window')
 
 if __name__ == '__main__':
   unittest.main()

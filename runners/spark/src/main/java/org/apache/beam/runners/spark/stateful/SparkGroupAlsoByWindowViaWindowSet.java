@@ -42,6 +42,7 @@ import org.apache.beam.runners.spark.translation.ReifyTimestampsAndWindowsFuncti
 import org.apache.beam.runners.spark.translation.TranslationUtils;
 import org.apache.beam.runners.spark.util.ByteArray;
 import org.apache.beam.runners.spark.util.GlobalWatermarkHolder;
+import org.apache.beam.runners.spark.util.TimerUtils;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.IterableCoder;
 import org.apache.beam.sdk.coders.KvCoder;
@@ -338,6 +339,9 @@ public class SparkGroupAlsoByWindowViaWindowSet implements Serializable {
               outputHolder.getWindowedValues();
 
           if (!outputs.isEmpty() || !stateInternals.getState().isEmpty()) {
+
+            TimerUtils.dropExpiredTimers(timerInternals, windowingStrategy);
+
             // empty outputs are filtered later using DStream filtering
             final StateAndTimers updated =
                 new StateAndTimers(
@@ -364,7 +368,7 @@ public class SparkGroupAlsoByWindowViaWindowSet implements Serializable {
     private final FullWindowedValueCoder<InputT> wvCoder;
     private final Coder<K> keyCoder;
     private final List<Integer> sourceIds;
-    private final TimerInternals.TimerDataCoder timerDataCoder;
+    private final TimerInternals.TimerDataCoderV2 timerDataCoder;
     private final WindowingStrategy<?, W> windowingStrategy;
     private final SerializablePipelineOptions options;
     private final IterableCoder<WindowedValue<InputT>> itrWvCoder;
@@ -457,9 +461,9 @@ public class SparkGroupAlsoByWindowViaWindowSet implements Serializable {
     return FullWindowedValueCoder.of(KvCoder.of(keyCoder, IterableCoder.of(iCoder)), wCoder);
   }
 
-  private static <W extends BoundedWindow> TimerInternals.TimerDataCoder timerDataCoderOf(
+  private static <W extends BoundedWindow> TimerInternals.TimerDataCoderV2 timerDataCoderOf(
       final WindowingStrategy<?, W> windowingStrategy) {
-    return TimerInternals.TimerDataCoder.of(windowingStrategy.getWindowFn().windowCoder());
+    return TimerInternals.TimerDataCoderV2.of(windowingStrategy.getWindowFn().windowCoder());
   }
 
   private static void checkpointIfNeeded(

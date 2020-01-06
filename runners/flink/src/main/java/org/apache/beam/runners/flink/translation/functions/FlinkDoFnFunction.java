@@ -25,8 +25,10 @@ import org.apache.beam.runners.core.DoFnRunners;
 import org.apache.beam.runners.core.construction.SerializablePipelineOptions;
 import org.apache.beam.runners.flink.FlinkPipelineOptions;
 import org.apache.beam.runners.flink.metrics.DoFnRunnerWithMetricsUpdate;
+import org.apache.beam.runners.flink.metrics.FlinkMetricContainer;
 import org.apache.beam.runners.flink.translation.utils.FlinkClassloading;
 import org.apache.beam.sdk.coders.Coder;
+import org.apache.beam.sdk.io.FileSystems;
 import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.DoFnSchemaInformation;
@@ -70,6 +72,7 @@ public class FlinkDoFnFunction<InputT, OutputT>
   private final Map<String, PCollectionView<?>> sideInputMapping;
 
   private transient DoFnInvoker<InputT, OutputT> doFnInvoker;
+  private transient FlinkMetricContainer metricContainer;
 
   public FlinkDoFnFunction(
       DoFn<InputT, OutputT> doFn,
@@ -129,8 +132,9 @@ public class FlinkDoFnFunction<InputT, OutputT>
             doFnSchemaInformation,
             sideInputMapping);
 
-    if ((serializedOptions.get().as(FlinkPipelineOptions.class)).getEnableMetrics()) {
-      doFnRunner = new DoFnRunnerWithMetricsUpdate<>(stepName, doFnRunner, getRuntimeContext());
+    FlinkPipelineOptions pipelineOptions = serializedOptions.get().as(FlinkPipelineOptions.class);
+    if (!pipelineOptions.getDisableMetrics()) {
+      doFnRunner = new DoFnRunnerWithMetricsUpdate<>(stepName, doFnRunner, metricContainer);
     }
 
     doFnRunner.startBundle();
@@ -143,13 +147,19 @@ public class FlinkDoFnFunction<InputT, OutputT>
   }
 
   @Override
-  public void open(Configuration parameters) throws Exception {
+  public void open(Configuration parameters) {
+    // Note that the SerializablePipelineOptions already initialize FileSystems in the readObject()
+    // deserialization method. However, this is a hack, and we want to properly initialize the
+    // options where they are needed.
+    FileSystems.setDefaultPipelineOptions(serializedOptions.get());
     doFnInvoker = DoFnInvokers.tryInvokeSetupFor(doFn);
+    metricContainer = new FlinkMetricContainer(getRuntimeContext());
   }
 
   @Override
   public void close() throws Exception {
     try {
+      metricContainer.registerMetricsForPipelineResult();
       Optional.ofNullable(doFnInvoker).ifPresent(DoFnInvoker::invokeTeardown);
     } finally {
       FlinkClassloading.deleteStaticCaches();

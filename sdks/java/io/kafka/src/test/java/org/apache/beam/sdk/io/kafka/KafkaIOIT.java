@@ -22,6 +22,7 @@ import static org.apache.beam.sdk.io.synthetic.SyntheticOptions.fromJsonString;
 import com.google.cloud.Timestamp;
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.BiFunction;
@@ -80,8 +81,7 @@ public class KafkaIOIT {
 
   private static final String TIMESTAMP = Timestamp.now().toString();
 
-  /** Hash for 1000 uniformly distributed records with 10B keys and 90B values (100kB total). */
-  private static final String EXPECTED_HASHCODE = "4507649971ee7c51abbb446e65a5c660";
+  private static String expectedHashcode;
 
   private static SyntheticSourceOptions sourceOptions;
 
@@ -95,6 +95,12 @@ public class KafkaIOIT {
   public static void setup() throws IOException {
     options = IOITHelper.readIOTestPipelineOptions(Options.class);
     sourceOptions = fromJsonString(options.getSourceOptions(), SyntheticSourceOptions.class);
+    // Map of hashes of set size collections with 100b records - 10b key, 90b values.
+    Map<Long, String> expectedHashes =
+        ImmutableMap.of(
+            1000L, "4507649971ee7c51abbb446e65a5c660",
+            100_000_000L, "0f12c27c9a7672e14775594be66cad9a");
+    expectedHashcode = getHashForRecordCount(sourceOptions.numRecords, expectedHashes);
   }
 
   @Test
@@ -112,7 +118,7 @@ public class KafkaIOIT {
             .apply("Map records to strings", MapElements.via(new MapKafkaRecordsToStrings()))
             .apply("Calculate hashcode", Combine.globally(new HashingFn()).withoutDefaults());
 
-    PAssert.thatSingleton(hashcode).isEqualTo(EXPECTED_HASHCODE);
+    PAssert.thatSingleton(hashcode).isEqualTo(expectedHashcode);
 
     PipelineResult writeResult = writePipeline.run();
     writeResult.waitUntilFinish();
@@ -120,7 +126,8 @@ public class KafkaIOIT {
     PipelineResult readResult = readPipeline.run();
     PipelineResult.State readState =
         readResult.waitUntilFinish(Duration.standardSeconds(options.getReadTimeout()));
-    cancelIfNotTerminal(readResult, readState);
+
+    cancelIfTimeouted(readResult, readState);
 
     Set<NamedTestResult> metrics = readMetrics(writeResult, readResult);
     IOITMetrics.publish(
@@ -146,16 +153,19 @@ public class KafkaIOIT {
     return ImmutableSet.of(readTime, writeTime, runTime);
   }
 
-  private void cancelIfNotTerminal(PipelineResult readResult, PipelineResult.State readState)
+  private void cancelIfTimeouted(PipelineResult readResult, PipelineResult.State readState)
       throws IOException {
-    if (!readState.isTerminal()) {
+
+    // TODO(lgajowy) this solution works for dataflow only - it returns null when
+    //  waitUntilFinish(Duration duration) exceeds provided duration.
+    if (readState == null) {
       readResult.cancel();
     }
   }
 
   private KafkaIO.Write<byte[], byte[]> writeToKafka() {
     return KafkaIO.<byte[], byte[]>write()
-        .withBootstrapServers(options.getKafkaBootstrapServerAddress())
+        .withBootstrapServers(options.getKafkaBootstrapServerAddresses())
         .withTopic(options.getKafkaTopic())
         .withKeySerializer(ByteArraySerializer.class)
         .withValueSerializer(ByteArraySerializer.class);
@@ -163,7 +173,7 @@ public class KafkaIOIT {
 
   private KafkaIO.Read<byte[], byte[]> readFromKafka() {
     return KafkaIO.readBytes()
-        .withBootstrapServers(options.getKafkaBootstrapServerAddress())
+        .withBootstrapServers(options.getKafkaBootstrapServerAddresses())
         .withConsumerConfigUpdates(ImmutableMap.of("auto.offset.reset", "earliest"))
         .withTopic(options.getKafkaTopic())
         .withMaxNumRecords(sourceOptions.numRecords);
@@ -178,11 +188,11 @@ public class KafkaIOIT {
 
     void setSourceOptions(String sourceOptions);
 
-    @Description("Kafka server address")
+    @Description("Kafka bootstrap server addresses")
     @Validation.Required
-    String getKafkaBootstrapServerAddress();
+    String getKafkaBootstrapServerAddresses();
 
-    void setKafkaBootstrapServerAddress(String address);
+    void setKafkaBootstrapServerAddresses(String address);
 
     @Description("Kafka topic")
     @Validation.Required
@@ -205,5 +215,14 @@ public class KafkaIOIT {
       String value = Arrays.toString(input.getKV().getValue());
       return String.format("%s %s", key, value);
     }
+  }
+
+  public static String getHashForRecordCount(long recordCount, Map<Long, String> hashes) {
+    String hash = hashes.get(recordCount);
+    if (hash == null) {
+      throw new UnsupportedOperationException(
+          String.format("No hash for that record count: %s", recordCount));
+    }
+    return hash;
   }
 }

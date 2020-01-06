@@ -66,6 +66,11 @@ See apache_beam.typehints.decorators module for more details.
 from __future__ import absolute_import
 
 from builtins import object
+from typing import Any
+from typing import Dict
+from typing import Iterable
+from typing import List
+from typing import Type
 
 from past.builtins import unicode
 
@@ -79,8 +84,8 @@ class CoderRegistry(object):
   """A coder registry for typehint/coder associations."""
 
   def __init__(self, fallback_coder=None):
-    self._coders = {}
-    self.custom_types = []
+    self._coders = {}  # type: Dict[Any, Type[coders.Coder]]
+    self.custom_types = []  # type: List[Any]
     self.register_standard_coders(fallback_coder)
 
   def register_standard_coders(self, fallback_coder):
@@ -88,6 +93,7 @@ class CoderRegistry(object):
     self._register_coder_internal(int, coders.VarIntCoder)
     self._register_coder_internal(float, coders.FloatCoder)
     self._register_coder_internal(bytes, coders.BytesCoder)
+    self._register_coder_internal(bool, coders.BooleanCoder)
     self._register_coder_internal(unicode, coders.StrUtf8Coder)
     self._register_coder_internal(typehints.TupleConstraint, coders.TupleCoder)
     # Default fallback coders applied in that order until the first matching
@@ -96,9 +102,11 @@ class CoderRegistry(object):
     self._fallback_coder = fallback_coder or FirstOf(default_fallback_coders)
 
   def _register_coder_internal(self, typehint_type, typehint_coder_class):
+    # type: (Any, Type[coders.Coder]) -> None
     self._coders[typehint_type] = typehint_coder_class
 
   def register_coder(self, typehint_type, typehint_coder_class):
+    # type: (Any, Type[coders.Coder]) -> None
     if not isinstance(typehint_coder_class, type):
       raise TypeError('Coder registration requires a coder class object. '
                       'Received %r instead.' % typehint_coder_class)
@@ -107,6 +115,7 @@ class CoderRegistry(object):
     self._register_coder_internal(typehint_type, typehint_coder_class)
 
   def get_coder(self, typehint):
+    # type: (Any) -> coders.Coder
     coder = self._coders.get(
         typehint.__class__ if isinstance(typehint, typehints.TypeConstraint)
         else typehint, None)
@@ -163,6 +172,7 @@ class FirstOf(object):
   A class used to get the first matching coder from a list of coders."""
 
   def __init__(self, coders):
+    # type: (Iterable[Type[coders.Coder]]) -> None
     self._coders = coders
 
   def from_type_hint(self, typehint, registry):

@@ -198,6 +198,9 @@ public class FnHarness {
       handlers.put(
           BeamFnApi.InstructionRequest.RequestCase.PROCESS_BUNDLE,
           processBundleHandler::processBundle);
+      handlers.put(
+          BeamFnApi.InstructionRequest.RequestCase.PROCESS_BUNDLE_SPLIT,
+          processBundleHandler::split);
       BeamFnControlClient control =
           new BeamFnControlClient(
               id, controlApiServiceDescriptor, channelFactory, outboundObserverFactory, handlers);
@@ -206,6 +209,7 @@ public class FnHarness {
 
       LOG.info("Entering instruction processing loop");
       control.processInstructionRequests(executorService);
+      processBundleHandler.shutdown();
     } finally {
       System.out.println("Shutting SDK harness down.");
       executorService.shutdown();

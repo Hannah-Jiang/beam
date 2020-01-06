@@ -32,6 +32,7 @@ import org.apache.beam.model.pipeline.v1.RunnerApi;
 import org.apache.beam.model.pipeline.v1.RunnerApi.Components;
 import org.apache.beam.model.pipeline.v1.RunnerApi.ExecutableStagePayload;
 import org.apache.beam.model.pipeline.v1.RunnerApi.PCollection;
+import org.apache.beam.runners.flink.metrics.FlinkMetricContainer;
 import org.apache.beam.runners.fnexecution.control.BundleProgressHandler;
 import org.apache.beam.runners.fnexecution.control.ExecutableStageContext;
 import org.apache.beam.runners.fnexecution.control.OutputReceiverFactory;
@@ -41,6 +42,7 @@ import org.apache.beam.runners.fnexecution.control.StageBundleFactory;
 import org.apache.beam.runners.fnexecution.provisioning.JobInfo;
 import org.apache.beam.runners.fnexecution.state.StateRequestHandler;
 import org.apache.beam.sdk.fn.data.FnDataReceiver;
+import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.transforms.join.RawUnionValue;
 import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.vendor.grpc.v1p21p0.com.google.protobuf.Struct;
@@ -196,6 +198,11 @@ public class FlinkExecutableStageFunctionTest {
               }
 
               @Override
+              public void split(double fractionOfRemainder) {
+                throw new UnsupportedOperationException();
+              }
+
+              @Override
               public void close() throws Exception {
                 if (once) {
                   return;
@@ -247,6 +254,21 @@ public class FlinkExecutableStageFunctionTest {
     verifyNoMoreInteractions(stageBundleFactory);
   }
 
+  @Test
+  public void testAccumulatorRegistrationOnOperatorClose() throws Exception {
+    FlinkExecutableStageFunction<Integer> function = getFunction(Collections.emptyMap());
+    function.open(new Configuration());
+
+    String metricContainerFieldName = "metricContainer";
+    FlinkMetricContainer monitoredContainer =
+        Mockito.spy(
+            (FlinkMetricContainer) Whitebox.getInternalState(function, metricContainerFieldName));
+    Whitebox.setInternalState(function, metricContainerFieldName, monitoredContainer);
+
+    function.close();
+    Mockito.verify(monitoredContainer).registerMetricsForPipelineResult();
+  }
+
   /**
    * Creates a {@link FlinkExecutableStageFunction}. Sets the runtime context to {@link
    * #runtimeContext}. The context factory is mocked to return {@link #stageContext} every time. The
@@ -257,7 +279,14 @@ public class FlinkExecutableStageFunctionTest {
         Mockito.mock(FlinkExecutableStageContextFactory.class);
     when(contextFactory.get(any())).thenReturn(stageContext);
     FlinkExecutableStageFunction<Integer> function =
-        new FlinkExecutableStageFunction<>(stagePayload, jobInfo, outputMap, contextFactory, null);
+        new FlinkExecutableStageFunction<>(
+            "step",
+            PipelineOptionsFactory.create(),
+            stagePayload,
+            jobInfo,
+            outputMap,
+            contextFactory,
+            null);
     function.setRuntimeContext(runtimeContext);
     Whitebox.setInternalState(function, "stateRequestHandler", stateRequestHandler);
     return function;

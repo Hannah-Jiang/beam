@@ -42,8 +42,8 @@ class PickleCoderTest(unittest.TestCase):
   def test_equality(self):
     self.assertEqual(coders.PickleCoder(), coders.PickleCoder())
     self.assertEqual(coders.Base64PickleCoder(), coders.Base64PickleCoder())
-    self.assertNotEquals(coders.Base64PickleCoder(), coders.PickleCoder())
-    self.assertNotEquals(coders.Base64PickleCoder(), object())
+    self.assertNotEqual(coders.Base64PickleCoder(), coders.PickleCoder())
+    self.assertNotEqual(coders.Base64PickleCoder(), object())
 
 
 class CodersTest(unittest.TestCase):
@@ -113,7 +113,7 @@ class DeterministicProtoCoderTest(unittest.TestCase):
       self.assertEqual(coder.encode(mm_forward), coder.encode(mm_reverse))
 
 
-class AvroTestCoder(coders.AvroCoder):
+class AvroTestCoder(coders.AvroGenericCoder):
   SCHEMA = """
   {
     "type": "record", "name": "testrecord",

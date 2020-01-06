@@ -49,13 +49,14 @@ import org.apache.beam.model.jobmanagement.v1.ArtifactRetrievalServiceGrpc.Artif
 import org.apache.beam.model.jobmanagement.v1.JobApi;
 import org.apache.beam.model.pipeline.v1.RunnerApi.Pipeline;
 import org.apache.beam.runners.core.construction.PipelineOptionsTranslation;
-import org.apache.beam.runners.core.construction.PipelineResources;
+import org.apache.beam.runners.core.construction.resources.PipelineResources;
 import org.apache.beam.runners.fnexecution.GrpcFnServer;
 import org.apache.beam.runners.fnexecution.InProcessServerFactory;
 import org.apache.beam.runners.fnexecution.artifact.BeamFileSystemArtifactRetrievalService;
 import org.apache.beam.runners.fnexecution.provisioning.JobInfo;
 import org.apache.beam.sdk.fn.test.InProcessManagedChannelFactory;
 import org.apache.beam.sdk.metrics.MetricResults;
+import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PortablePipelineOptions;
 import org.apache.beam.vendor.grpc.v1p21p0.com.google.protobuf.MessageOrBuilder;
 import org.apache.beam.vendor.grpc.v1p21p0.com.google.protobuf.util.JsonFormat;
@@ -99,16 +100,19 @@ public class PortablePipelineJarCreator implements PortablePipelineRunner {
         PipelineOptionsTranslation.fromProto(jobInfo.pipelineOptions())
             .as(PortablePipelineOptions.class);
 
+    final String jobName = jobInfo.jobName();
     File outputFile = new File(pipelineOptions.getOutputExecutablePath());
-    LOG.info("Creating jar {}", outputFile.getAbsolutePath());
-    outputStream = new JarOutputStream(new FileOutputStream(outputFile), createManifest(mainClass));
+    LOG.info("Creating jar {} for job {}", outputFile.getAbsolutePath(), jobName);
+    outputStream =
+        new JarOutputStream(new FileOutputStream(outputFile), createManifest(mainClass, jobName));
     outputChannel = Channels.newChannel(outputStream);
-    writeClassPathResources(mainClass.getClassLoader());
-    writeAsJson(pipeline, PortablePipelineJarUtils.PIPELINE_PATH);
+    PortablePipelineJarUtils.writeDefaultJobName(outputStream, jobName);
+    writeClassPathResources(mainClass.getClassLoader(), pipelineOptions);
+    writeAsJson(pipeline, PortablePipelineJarUtils.getPipelineUri(jobName));
     writeAsJson(
         PipelineOptionsTranslation.toProto(pipelineOptions),
-        PortablePipelineJarUtils.PIPELINE_OPTIONS_PATH);
-    writeArtifacts(jobInfo.retrievalToken());
+        PortablePipelineJarUtils.getPipelineOptionsUri(jobName));
+    writeArtifacts(jobInfo.retrievalToken(), jobName);
     // Closing the channel also closes the underlying stream.
     outputChannel.close();
 
@@ -117,7 +121,7 @@ public class PortablePipelineJarCreator implements PortablePipelineRunner {
   }
 
   @VisibleForTesting
-  Manifest createManifest(Class mainClass) {
+  Manifest createManifest(Class mainClass, String defaultJobName) {
     Manifest manifest = new Manifest();
     manifest.getMainAttributes().put(Attributes.Name.MANIFEST_VERSION, "1.0");
     boolean classHasMainMethod = false;
@@ -141,9 +145,10 @@ public class PortablePipelineJarCreator implements PortablePipelineRunner {
   }
 
   /** Copy resources from {@code classLoader} to {@link #outputStream}. */
-  private void writeClassPathResources(ClassLoader classLoader) throws IOException {
+  private void writeClassPathResources(ClassLoader classLoader, PipelineOptions options)
+      throws IOException {
     List<String> classPathResources =
-        PipelineResources.detectClassPathResourcesToStage(classLoader);
+        PipelineResources.detectClassPathResourcesToStage(classLoader, options);
     Preconditions.checkArgument(
         classPathResources.size() == 1, "Expected exactly one jar on " + classLoader.toString());
     copyResourcesFromJar(new JarFile(classPathResources.get(0)));
@@ -156,13 +161,7 @@ public class PortablePipelineJarCreator implements PortablePipelineRunner {
     // The zip spec allows multiple files with the same name; the Java zip libraries do not.
     // Keep track of the files we've already written to filter out duplicates.
     // Also, ignore the old manifest; we want to write our own.
-    Set<String> previousEntryNames =
-        new HashSet<>(
-            ImmutableList.of(
-                JarFile.MANIFEST_NAME,
-                PortablePipelineJarUtils.ARTIFACT_MANIFEST_PATH,
-                PortablePipelineJarUtils.PIPELINE_PATH,
-                PortablePipelineJarUtils.PIPELINE_OPTIONS_PATH));
+    Set<String> previousEntryNames = new HashSet<>(ImmutableList.of(JarFile.MANIFEST_NAME));
     while (inputJarEntries.hasMoreElements()) {
       JarEntry inputJarEntry = inputJarEntries.nextElement();
       InputStream inputStream = inputJar.getInputStream(inputJarEntry);
@@ -193,7 +192,8 @@ public class PortablePipelineJarCreator implements PortablePipelineRunner {
    * @return A {@link ProxyManifest} pointing to the artifacts' location in the output jar.
    */
   @VisibleForTesting
-  ProxyManifest copyStagedArtifacts(String retrievalToken, ArtifactRetriever retrievalServiceStub)
+  ProxyManifest copyStagedArtifacts(
+      String retrievalToken, ArtifactRetriever retrievalServiceStub, String jobName)
       throws IOException {
     GetManifestRequest manifestRequest =
         GetManifestRequest.newBuilder().setRetrievalToken(retrievalToken).build();
@@ -202,7 +202,7 @@ public class PortablePipelineJarCreator implements PortablePipelineRunner {
     ProxyManifest.Builder proxyManifestBuilder = ProxyManifest.newBuilder().setManifest(manifest);
     for (ArtifactMetadata artifact : manifest.getArtifactList()) {
       String outputPath =
-          PortablePipelineJarUtils.ARTIFACT_FOLDER_PATH + "/" + UUID.randomUUID().toString();
+          PortablePipelineJarUtils.getArtifactUri(jobName, UUID.randomUUID().toString());
       LOG.trace("Copying artifact {} to {}", artifact.getName(), outputPath);
       proxyManifestBuilder.addLocation(
           Location.newBuilder().setName(artifact.getName()).setUri("/" + outputPath).build());
@@ -224,7 +224,7 @@ public class PortablePipelineJarCreator implements PortablePipelineRunner {
    * Uses {@link BeamFileSystemArtifactRetrievalService} to fetch artifacts, then writes the
    * artifacts to {@code outputStream}. Include a {@link ProxyManifest} to locate artifacts later.
    */
-  private void writeArtifacts(String retrievalToken) throws Exception {
+  private void writeArtifacts(String retrievalToken, String jobName) throws Exception {
     try (GrpcFnServer artifactServer =
         GrpcFnServer.allocatePortAndCreateFor(
             BeamFileSystemArtifactRetrievalService.create(), InProcessServerFactory.create())) {
@@ -246,8 +246,9 @@ public class PortablePipelineJarCreator implements PortablePipelineRunner {
                 public Iterator<ArtifactChunk> getArtifact(GetArtifactRequest request) {
                   return retrievalServiceStub.getArtifact(request);
                 }
-              });
-      writeAsJson(proxyManifest, PortablePipelineJarUtils.ARTIFACT_MANIFEST_PATH);
+              },
+              jobName);
+      writeAsJson(proxyManifest, PortablePipelineJarUtils.getArtifactManifestUri(jobName));
       grpcChannel.shutdown();
     }
   }

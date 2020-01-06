@@ -20,6 +20,7 @@
 from __future__ import absolute_import
 
 import argparse
+import logging
 import os
 import subprocess
 import sys
@@ -33,6 +34,7 @@ from past.builtins import unicode
 
 import apache_beam as beam
 from apache_beam import Pipeline
+from apache_beam.coders import BooleanCoder
 from apache_beam.coders import FloatCoder
 from apache_beam.coders import IterableCoder
 from apache_beam.coders import StrUtf8Coder
@@ -54,7 +56,7 @@ from apache_beam.transforms.external import NamedTupleBasedPayloadBuilder
 try:
   from apache_beam.runners.dataflow.internal import apiclient
 except ImportError:
-  apiclient = None
+  apiclient = None  # type: ignore
 # pylint: enable=wrong-import-order, wrong-import-position
 
 
@@ -65,6 +67,7 @@ def get_payload(args):
 class PayloadBase(object):
   values = {
       'integer_example': 1,
+      'boolean': True,
       'string_example': u'thing',
       'list_of_strings': [u'foo', u'bar'],
       'optional_kv': (u'key', 1.1),
@@ -73,6 +76,7 @@ class PayloadBase(object):
 
   bytes_values = {
       'integer_example': 1,
+      'boolean': True,
       'string_example': 'thing',
       'list_of_strings': ['foo', 'bar'],
       'optional_kv': ('key', 1.1),
@@ -84,6 +88,10 @@ class PayloadBase(object):
           coder_urn=['beam:coder:varint:v1'],
           payload=VarIntCoder()
           .get_impl().encode_nested(values['integer_example'])),
+      'boolean': ConfigValue(
+          coder_urn=['beam:coder:bool:v1'],
+          payload=BooleanCoder()
+          .get_impl().encode_nested(values['boolean'])),
       'string_example': ConfigValue(
           coder_urn=['beam:coder:string_utf8:v1'],
           payload=StrUtf8Coder()
@@ -150,6 +158,7 @@ class ExternalTuplePayloadTest(PayloadBase, unittest.TestCase):
         'TestSchema',
         [
             ('integer_example', int),
+            ('boolean', bool),
             ('string_example', unicode),
             ('list_of_strings', typing.List[unicode]),
             ('optional_kv', typing.Optional[typing.Tuple[unicode, float]]),
@@ -187,6 +196,10 @@ class ExternalImplicitPayloadTest(unittest.TestCase):
               coder_urn=['beam:coder:varint:v1'],
               payload=VarIntCoder()
               .get_impl().encode_nested(values['integer_example'])),
+          'boolean': ConfigValue(
+              coder_urn=['beam:coder:bool:v1'],
+              payload=BooleanCoder()
+              .get_impl().encode_nested(values['boolean'])),
           'string_example': ConfigValue(
               coder_urn=['beam:coder:bytes:v1'],
               payload=StrUtf8Coder()
@@ -214,8 +227,8 @@ class ExternalImplicitPayloadTest(unittest.TestCase):
 class ExternalTransformTest(unittest.TestCase):
 
   # This will be overwritten if set via a flag.
-  expansion_service_jar = None
-  expansion_service_port = None
+  expansion_service_jar = None  # type: str
+  expansion_service_port = None  # type: int
 
   class _RunWithExpansion(object):
 
@@ -307,9 +320,23 @@ class ExternalTransformTest(unittest.TestCase):
     with beam.Pipeline() as p:
       assert_that(p | FibTransform(6), equal_to([8]))
 
+  def test_unique_name(self):
+    p = beam.Pipeline()
+    _ = p | FibTransform(6)
+    proto = p.to_runner_api()
+    xforms = [x.unique_name for x in proto.components.transforms.values()]
+    self.assertEqual(
+        len(set(xforms)), len(xforms), msg='Transform names are not unique.')
+    pcolls = [x.unique_name for x in proto.components.pcollections.values()]
+    self.assertEqual(
+        len(set(pcolls)), len(pcolls), msg='PCollection names are not unique.')
+
   def test_java_expansion_portable_runner(self):
     ExternalTransformTest.expansion_service_port = os.environ.get(
         'EXPANSION_PORT')
+    if ExternalTransformTest.expansion_service_port:
+      ExternalTransformTest.expansion_service_port = int(
+          ExternalTransformTest.expansion_service_port)
 
     ExternalTransformTest.run_pipeline_with_portable_runner(None)
 
@@ -348,7 +375,7 @@ class ExternalTransformTest(unittest.TestCase):
 
   @staticmethod
   def run_pipeline(
-      pipeline_options, expansion_service_port, wait_until_finish=True):
+      pipeline_options, expansion_service, wait_until_finish=True):
     # The actual definitions of these transforms is in
     # org.apache.beam.runners.core.construction.TestExpansionService.
     TEST_COUNT_URN = "beam:transforms:xlang:count"
@@ -357,15 +384,18 @@ class ExternalTransformTest(unittest.TestCase):
     # Run a simple count-filtered-letters pipeline.
     p = TestPipeline(options=pipeline_options)
 
-    address = 'localhost:%s' % str(expansion_service_port)
+    if isinstance(expansion_service, int):
+      # Only the port was specified.
+      expansion_service = 'localhost:%s' % str(expansion_service)
+
     res = (
         p
         | beam.Create(list('aaabccxyyzzz'))
         | beam.Map(unicode)
         # TODO(BEAM-6587): Use strings directly rather than ints.
         | beam.Map(lambda x: int(ord(x)))
-        | beam.ExternalTransform(TEST_FILTER_URN, b'middle', address)
-        | beam.ExternalTransform(TEST_COUNT_URN, None, address)
+        | beam.ExternalTransform(TEST_FILTER_URN, b'middle', expansion_service)
+        | beam.ExternalTransform(TEST_COUNT_URN, None, expansion_service)
         # # TODO(BEAM-6587): Remove when above is removed.
         | beam.Map(lambda kv: (chr(kv[0]), kv[1]))
         | beam.Map(lambda kv: '%s: %s' % kv))
@@ -378,9 +408,12 @@ class ExternalTransformTest(unittest.TestCase):
 
 
 if __name__ == '__main__':
+  logging.getLogger().setLevel(logging.INFO)
   parser = argparse.ArgumentParser()
   parser.add_argument('--expansion_service_jar')
   parser.add_argument('--expansion_service_port')
+  parser.add_argument('--expansion_service_target')
+  parser.add_argument('--expansion_service_target_appendix')
   known_args, pipeline_args = parser.parse_known_args(sys.argv)
 
   if known_args.expansion_service_jar:
@@ -390,6 +423,13 @@ if __name__ == '__main__':
         known_args.expansion_service_port)
     pipeline_options = PipelineOptions(pipeline_args)
     ExternalTransformTest.run_pipeline_with_portable_runner(pipeline_options)
+  elif known_args.expansion_service_target:
+    pipeline_options = PipelineOptions(pipeline_args)
+    ExternalTransformTest.run_pipeline(
+        pipeline_options,
+        beam.transforms.external.BeamJarExpansionService(
+            known_args.expansion_service_target,
+            gradle_appendix=known_args.expansion_service_target_appendix))
   else:
     sys.argv = pipeline_args
     unittest.main()

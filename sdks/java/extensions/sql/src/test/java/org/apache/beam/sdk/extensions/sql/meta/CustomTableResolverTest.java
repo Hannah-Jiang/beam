@@ -17,18 +17,23 @@
  */
 package org.apache.beam.sdk.extensions.sql.meta;
 
+import static org.junit.Assert.assertThrows;
+
 import java.io.Serializable;
+import java.util.List;
 import java.util.Map;
-import org.apache.beam.sdk.extensions.sql.BeamSqlTable;
 import org.apache.beam.sdk.extensions.sql.SqlTransform;
 import org.apache.beam.sdk.extensions.sql.impl.TableName;
 import org.apache.beam.sdk.extensions.sql.meta.provider.FullNameTableProvider;
+import org.apache.beam.sdk.extensions.sql.meta.provider.test.TestBoundedTable;
 import org.apache.beam.sdk.extensions.sql.meta.provider.test.TestTableProvider;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.testing.PAssert;
 import org.apache.beam.sdk.testing.TestPipeline;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.Row;
+import org.apache.beam.vendor.calcite.v1_20_0.com.google.common.collect.ImmutableList;
+import org.apache.beam.vendor.calcite.v1_20_0.org.apache.calcite.rex.RexNode;
 import org.joda.time.Duration;
 import org.junit.Rule;
 import org.junit.Test;
@@ -113,6 +118,52 @@ public class CustomTableResolverTest implements Serializable {
                 .withDefaultTableProvider("testprovider", tableProvider));
 
     PAssert.that(result).containsInAnyOrder(row(1, "one"), row(2, "two"));
+
+    pipeline.run().waitUntilFinish(Duration.standardMinutes(2));
+  }
+
+  @Test
+  public void testDefaultBuildIOReader_withEmptyParams_returnsPCollection() {
+    TestBoundedTable testTable = TestBoundedTable.of(BASIC_SCHEMA).addRows(1, "one");
+    Row expected = row(1, "one");
+
+    PCollection<Row> resultWithEmpty =
+        testTable.buildIOReader(
+            pipeline.begin(), testTable.constructFilter(ImmutableList.of()), ImmutableList.of());
+
+    PAssert.that(resultWithEmpty).containsInAnyOrder(expected);
+
+    pipeline.run().waitUntilFinish(Duration.standardMinutes(2));
+  }
+
+  @Test
+  public void testDefaultBuildIOReader_withNonEmptyParams_throwsException() {
+    TestBoundedTable testTable = TestBoundedTable.of(BASIC_SCHEMA).addRows(1, "one");
+
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            testTable.buildIOReader(
+                pipeline.begin(),
+                new BeamSqlTableFilter() {
+                  @Override
+                  public List<RexNode> getNotSupported() {
+                    return null;
+                  }
+
+                  @Override
+                  public int numSupported() {
+                    return 0;
+                  }
+                },
+                ImmutableList.of()));
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            testTable.buildIOReader(
+                pipeline.begin(),
+                new DefaultTableFilter(ImmutableList.of()),
+                ImmutableList.of("one")));
 
     pipeline.run().waitUntilFinish(Duration.standardMinutes(2));
   }

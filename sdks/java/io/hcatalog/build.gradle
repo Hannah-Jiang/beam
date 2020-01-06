@@ -17,7 +17,7 @@
  */
 
 plugins { id 'org.apache.beam.module' }
-applyJavaNature()
+applyJavaNature(automaticModuleName: 'org.apache.beam.sdk.io.hcatalog')
 
 description = "Apache Beam :: SDKs :: Java :: IO :: HCatalog"
 ext.summary = "IO to read and write for HCatalog source."
@@ -67,6 +67,6 @@ dependencies {
   testCompile "org.apache.hive:hive-exec:$hive_version"
   testCompile "org.apache.hive:hive-common:$hive_version"
   testCompile "org.apache.hive:hive-cli:$hive_version"
-  testRuntimeOnly project(":runners:direct-java")
+  testRuntimeOnly project(path: ":runners:direct-java", configuration: "shadow")
 }
 

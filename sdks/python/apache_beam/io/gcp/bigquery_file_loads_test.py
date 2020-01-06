@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import random
+import sys
 import time
 import unittest
 
@@ -56,6 +57,8 @@ try:
 except ImportError:
   HttpError = None
 
+
+_LOGGER = logging.getLogger(__name__)
 
 _DESTINATION_ELEMENT_PAIRS = [
     # DESTINATION 1
@@ -119,7 +122,7 @@ class TestWriteRecordsToFile(_TestCaseWithTempDirCleanUp):
     with TestPipeline() as p:
       output_pcs = (
           p
-          | beam.Create(_DESTINATION_ELEMENT_PAIRS)
+          | beam.Create(_DESTINATION_ELEMENT_PAIRS, reshuffle=False)
           | beam.ParDo(fn, self.tmpdir)
           .with_outputs(fn.WRITTEN_FILE_TAG, fn.UNWRITTEN_RECORD_TAG))
 
@@ -322,16 +325,16 @@ class TestPartitionFiles(unittest.TestCase):
                                   ('destination0', ['file2', 'file3'])]
     single_partition_result = [('destination1', ['file0', 'file1'])]
     with TestPipeline() as p:
-      destination_file_pairs = p | beam.Create(self._ELEMENTS)
+      destination_file_pairs = p | beam.Create(self._ELEMENTS, reshuffle=False)
       partitioned_files = (
           destination_file_pairs
           | beam.ParDo(bqfl.PartitionFiles(1000, 2))
           .with_outputs(bqfl.PartitionFiles.MULTIPLE_PARTITIONS_TAG,
                         bqfl.PartitionFiles.SINGLE_PARTITION_TAG))
       multiple_partitions = partitioned_files[bqfl.PartitionFiles\
-        .MULTIPLE_PARTITIONS_TAG]
+                                              .MULTIPLE_PARTITIONS_TAG]
       single_partition = partitioned_files[bqfl.PartitionFiles\
-        .SINGLE_PARTITION_TAG]
+                                           .SINGLE_PARTITION_TAG]
 
     assert_that(multiple_partitions, equal_to(multiple_partitions_result),
                 label='CheckMultiplePartitions')
@@ -344,16 +347,16 @@ class TestPartitionFiles(unittest.TestCase):
                                   ('destination0', ['file3'])]
     single_partition_result = [('destination1', ['file0', 'file1'])]
     with TestPipeline() as p:
-      destination_file_pairs = p | beam.Create(self._ELEMENTS)
+      destination_file_pairs = p | beam.Create(self._ELEMENTS, reshuffle=False)
       partitioned_files = (
           destination_file_pairs
           | beam.ParDo(bqfl.PartitionFiles(150, 10))
           .with_outputs(bqfl.PartitionFiles.MULTIPLE_PARTITIONS_TAG,
                         bqfl.PartitionFiles.SINGLE_PARTITION_TAG))
       multiple_partitions = partitioned_files[bqfl.PartitionFiles\
-        .MULTIPLE_PARTITIONS_TAG]
+                                              .MULTIPLE_PARTITIONS_TAG]
       single_partition = partitioned_files[bqfl.PartitionFiles\
-        .SINGLE_PARTITION_TAG]
+                                           .SINGLE_PARTITION_TAG]
 
     assert_that(multiple_partitions, equal_to(multiple_partitions_result),
                 label='CheckMultiplePartitions')
@@ -424,6 +427,90 @@ class TestBigQueryFileLoads(_TestCaseWithTempDirCleanUp):
       assert_that(jobs,
                   equal_to([job_reference]), label='CheckJobs')
 
+  @unittest.skipIf(sys.version_info[0] == 2,
+                   'Mock pickling problems in Py 2')
+  @mock.patch('time.sleep')
+  def test_wait_for_job_completion(self, sleep_mock):
+    job_references = [bigquery_api.JobReference(),
+                      bigquery_api.JobReference()]
+    job_references[0].projectId = 'project1'
+    job_references[0].jobId = 'jobId1'
+    job_references[1].projectId = 'project1'
+    job_references[1].jobId = 'jobId2'
+
+    job_1_waiting = mock.Mock()
+    job_1_waiting.status.state = 'RUNNING'
+    job_2_done = mock.Mock()
+    job_2_done.status.state = 'DONE'
+    job_2_done.status.errorResult = None
+
+    job_1_done = mock.Mock()
+    job_1_done.status.state = 'DONE'
+    job_1_done.status.errorResult = None
+
+    bq_client = mock.Mock()
+    bq_client.jobs.Get.side_effect = [
+        job_1_waiting,
+        job_2_done,
+        job_1_done,
+        job_2_done]
+
+    waiting_dofn = bqfl.WaitForBQJobs(bq_client)
+
+    dest_list = [(i, job) for i, job in enumerate(job_references)]
+
+    with TestPipeline('DirectRunner') as p:
+      references = beam.pvalue.AsList(p | 'job_ref' >> beam.Create(dest_list))
+      outputs = (p
+                 | beam.Create([''])
+                 | beam.ParDo(waiting_dofn, references))
+
+      assert_that(outputs,
+                  equal_to(dest_list))
+
+    sleep_mock.assert_called_once()
+
+  @unittest.skipIf(sys.version_info[0] == 2,
+                   'Mock pickling problems in Py 2')
+  @mock.patch('time.sleep')
+  def test_one_job_failed_after_waiting(self, sleep_mock):
+    job_references = [bigquery_api.JobReference(),
+                      bigquery_api.JobReference()]
+    job_references[0].projectId = 'project1'
+    job_references[0].jobId = 'jobId1'
+    job_references[1].projectId = 'project1'
+    job_references[1].jobId = 'jobId2'
+
+    job_1_waiting = mock.Mock()
+    job_1_waiting.status.state = 'RUNNING'
+    job_2_done = mock.Mock()
+    job_2_done.status.state = 'DONE'
+    job_2_done.status.errorResult = None
+
+    job_1_error = mock.Mock()
+    job_1_error.status.state = 'DONE'
+    job_1_error.status.errorResult = 'Some problems happened'
+
+    bq_client = mock.Mock()
+    bq_client.jobs.Get.side_effect = [
+        job_1_waiting,
+        job_2_done,
+        job_1_error,
+        job_2_done]
+
+    waiting_dofn = bqfl.WaitForBQJobs(bq_client)
+
+    dest_list = [(i, job) for i, job in enumerate(job_references)]
+
+    with self.assertRaises(Exception):
+      with TestPipeline('DirectRunner') as p:
+        references = beam.pvalue.AsList(p | 'job_ref' >> beam.Create(dest_list))
+        _ = (p
+             | beam.Create([''])
+             | beam.ParDo(waiting_dofn, references))
+
+    sleep_mock.assert_called_once()
+
   def test_multiple_partition_files(self):
     destination = 'project1:dataset1.table1'
 
@@ -446,7 +533,7 @@ class TestBigQueryFileLoads(_TestCaseWithTempDirCleanUp):
 
     with TestPipeline('DirectRunner') as p:
       outputs = (p
-                 | beam.Create(_ELEMENTS)
+                 | beam.Create(_ELEMENTS, reshuffle=False)
                  | bqfl.BigQueryBatchFileLoads(
                      destination,
                      custom_gcs_temp_location=self._new_tempdir(),
@@ -524,7 +611,7 @@ class BigQueryFileLoadsIT(unittest.TestCase):
     self.bigquery_client = bigquery_tools.BigQueryWrapper()
     self.bigquery_client.get_or_create_dataset(self.project, self.dataset_id)
     self.output_table = "%s.output_table" % (self.dataset_id)
-    logging.info("Created dataset %s in project %s",
+    _LOGGER.info("Created dataset %s in project %s",
                  self.dataset_id, self.project)
 
   @attr('IT')
@@ -573,7 +660,7 @@ class BigQueryFileLoadsIT(unittest.TestCase):
         experiments='use_beam_bq_sink')
 
     with beam.Pipeline(argv=args) as p:
-      input = p | beam.Create(_ELEMENTS)
+      input = p | beam.Create(_ELEMENTS, reshuffle=False)
 
       schema_map_pcv = beam.pvalue.AsDict(
           p | "MakeSchemas" >> beam.Create(schema_kv_pairs))
@@ -709,11 +796,11 @@ class BigQueryFileLoadsIT(unittest.TestCase):
         projectId=self.project, datasetId=self.dataset_id,
         deleteContents=True)
     try:
-      logging.info("Deleting dataset %s in project %s",
+      _LOGGER.info("Deleting dataset %s in project %s",
                    self.dataset_id, self.project)
       self.bigquery_client.client.datasets.Delete(request)
     except HttpError:
-      logging.debug('Failed to clean up dataset %s in project %s',
+      _LOGGER.debug('Failed to clean up dataset %s in project %s',
                     self.dataset_id, self.project)
 
 

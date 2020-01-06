@@ -38,7 +38,6 @@ from apache_beam import typehints
 from apache_beam.coders import typecoders
 from apache_beam.internal import pickler
 from apache_beam.internal import util
-from apache_beam.options.pipeline_options import DebugOptions
 from apache_beam.options.pipeline_options import TypeOptions
 from apache_beam.portability import common_urns
 from apache_beam.portability import python_urns
@@ -63,13 +62,24 @@ from apache_beam.typehints.decorators import get_signature
 from apache_beam.typehints.decorators import get_type_hints
 from apache_beam.typehints.trivial_inference import element_type
 from apache_beam.typehints.typehints import is_consistent_with
+from apache_beam.utils import timestamp
 from apache_beam.utils import urns
+from apache_beam.utils.timestamp import Duration
+
+if typing.TYPE_CHECKING:
+  from google.protobuf import message  # pylint: disable=ungrouped-imports
+  from apache_beam.io import iobase
+  from apache_beam.pipeline import Pipeline
+  from apache_beam.runners.pipeline_context import PipelineContext
+  from apache_beam.transforms import create_source
+  from apache_beam.transforms.trigger import AccumulationMode
+  from apache_beam.transforms.trigger import DefaultTrigger
+  from apache_beam.transforms.trigger import TriggerFn
 
 try:
   import funcsigs  # Python 2 only.
 except ImportError:
   funcsigs = None
-
 
 __all__ = [
     'DoFn',
@@ -91,13 +101,16 @@ __all__ = [
     'Flatten',
     'Create',
     'Impulse',
-    'RestrictionProvider'
+    'RestrictionProvider',
+    'WatermarkEstimator'
     ]
 
 # Type variables
 T = typing.TypeVar('T')
 K = typing.TypeVar('K')
 V = typing.TypeVar('V')
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class DoFnContext(object):
@@ -240,7 +253,10 @@ class RestrictionProvider(object):
   """
 
   def create_tracker(self, restriction):
+    # type: (...) -> iobase.RestrictionTracker
     """Produces a new ``RestrictionTracker`` for the given restriction.
+
+    This API is required to be implemented.
 
     Args:
       restriction: an object that defines a restriction as identified by a
@@ -252,7 +268,10 @@ class RestrictionProvider(object):
     raise NotImplementedError
 
   def initial_restriction(self, element):
-    """Produces an initial restriction for the given element."""
+    """Produces an initial restriction for the given element.
+
+    This API is required to be implemented.
+    """
     raise NotImplementedError
 
   def split(self, element, restriction):
@@ -262,6 +281,9 @@ class RestrictionProvider(object):
     reading input element for each of the returned restrictions should be the
     same as the total set of elements produced by reading the input element for
     the input restriction.
+
+    This API is optional if ``split_and_size`` has been implemented.
+
     """
     yield restriction
 
@@ -281,17 +303,23 @@ class RestrictionProvider(object):
 
     By default, asks a newly-created restriction tracker for the default size
     of the restriction.
+
+    This API is required to be implemented.
     """
-    return self.create_tracker(restriction).default_size()
+    raise NotImplementedError
 
   def split_and_size(self, element, restriction):
     """Like split, but also does sizing, returning (restriction, size) pairs.
+
+    This API is optional if ``split`` and ``restriction_size`` have been
+    implemented.
     """
     for part in self.split(element, restriction):
       yield part, self.restriction_size(element, part)
 
 
 def get_function_arguments(obj, func):
+  # type: (...) -> typing.Tuple[typing.List[str], typing.List[typing.Any]]
   """Return the function arguments based on the name provided. If they have
   a _inspect_function attached to the class then use that otherwise default
   to the modified version of python inspect library.
@@ -308,6 +336,7 @@ def get_function_arguments(obj, func):
 
 
 def get_function_args_defaults(f):
+  # type: (...) -> typing.Tuple[typing.List[str], typing.List[typing.Any]]
   """Returns the function arguments of a given function.
 
   Returns:
@@ -329,7 +358,7 @@ def get_function_args_defaults(f):
   args = [name for name, p in signature.parameters.items()
           if p.kind in _SUPPORTED_ARG_TYPES]
   defaults = [p.default for p in signature.parameters.values()
-              if p.kind in _SUPPORTED_ARG_TYPES and p.default != p.empty]
+              if p.kind in _SUPPORTED_ARG_TYPES and p.default is not p.empty]
 
   return args, defaults
 
@@ -362,21 +391,58 @@ class RunnerAPIPTransformHolder(PTransform):
       else:
         env1 = id_to_proto_map[env_id]
         env2 = context.environments[env_id]
-        assert env1.urn == env2.proto.urn, (
+        assert env1.urn == env2.to_runner_api(context).urn, (
             'Expected environments with the same ID to be equal but received '
             'environments with different URNs '
             '%r and %r',
-            env1.urn, env2.proto.urn)
-        assert env1.payload == env2.proto.payload, (
+            env1.urn, env2.to_runner_api(context).urn)
+        assert env1.payload == env2.to_runner_api(context).payload, (
             'Expected environments with the same ID to be equal but received '
             'environments with different payloads '
             '%r and %r',
-            env1.payload, env2.proto.payload)
+            env1.payload, env2.to_runner_api(context).payload)
     return self._proto
 
   def get_restriction_coder(self):
     # TODO(BEAM-7172): support external transforms that are SDFs.
     return None
+
+
+class WatermarkEstimator(object):
+  """A WatermarkEstimator which is used for tracking output_watermark in a
+  DoFn.process(), typically tracking per <element, restriction> pair in SDF in
+  streaming.
+
+  There are 3 APIs in this class: set_watermark, current_watermark and reset
+  with default implementations.
+
+  TODO(BEAM-8537): Create WatermarkEstimatorProvider to support different types.
+  """
+  def __init__(self):
+    self._watermark = None
+
+  def set_watermark(self, watermark):
+    """Update tracking output_watermark with latest output_watermark.
+    This function is called inside an SDF.Process() to track the watermark of
+    output element.
+
+    Args:
+      watermark: the `timestamp.Timestamp` of current output element.
+    """
+    if not isinstance(watermark, timestamp.Timestamp):
+      raise ValueError('watermark should be a object of timestamp.Timestamp')
+    if self._watermark is None:
+      self._watermark = watermark
+    else:
+      self._watermark = min(self._watermark, watermark)
+
+  def current_watermark(self):
+    """Get current output_watermark. This function is called by system."""
+    return self._watermark
+
+  def reset(self):
+    """ Reset current tracking watermark to None."""
+    self._watermark = None
 
 
 class _DoFnParam(object):
@@ -405,6 +471,7 @@ class _RestrictionDoFnParam(_DoFnParam):
   """Restriction Provider DoFn parameter."""
 
   def __init__(self, restriction_provider):
+    # type: (RestrictionProvider) -> None
     if not isinstance(restriction_provider, RestrictionProvider):
       raise ValueError(
           'DoFn.RestrictionParam expected RestrictionProvider object.')
@@ -417,6 +484,7 @@ class _StateDoFnParam(_DoFnParam):
   """State DoFn parameter."""
 
   def __init__(self, state_spec):
+    # type: (StateSpec) -> None
     if not isinstance(state_spec, StateSpec):
       raise ValueError("DoFn.StateParam expected StateSpec object.")
     self.state_spec = state_spec
@@ -427,6 +495,7 @@ class _TimerDoFnParam(_DoFnParam):
   """Timer DoFn parameter."""
 
   def __init__(self, timer_spec):
+    # type: (TimerSpec) -> None
     if not isinstance(timer_spec, TimerSpec):
       raise ValueError("DoFn.TimerParam expected TimerSpec object.")
     self.timer_spec = timer_spec
@@ -450,13 +519,24 @@ class _BundleFinalizerParam(_DoFnParam):
       try:
         callback()
       except Exception as e:
-        logging.warn("Got exception from finalization call: %s", e)
+        _LOGGER.warning("Got exception from finalization call: %s", e)
 
   def has_callbacks(self):
     return len(self._callbacks) > 0
 
   def reset(self):
     del self._callbacks[:]
+
+
+class _WatermarkEstimatorParam(_DoFnParam):
+  """WatermarkEstomator DoFn parameter."""
+
+  def __init__(self, watermark_estimator):
+    if not isinstance(watermark_estimator, WatermarkEstimator):
+      raise ValueError('DoFn.WatermarkEstimatorParam expected'
+                       'WatermarkEstimator object.')
+    self.watermark_estimator = watermark_estimator
+    self.param_id = 'WatermarkEstimator'
 
 
 class DoFn(WithTypeHints, HasDisplayData, urns.RunnerApiFn):
@@ -477,7 +557,7 @@ class DoFn(WithTypeHints, HasDisplayData, urns.RunnerApiFn):
   TimestampParam = _DoFnParam('TimestampParam')
   WindowParam = _DoFnParam('WindowParam')
   PaneInfoParam = _DoFnParam('PaneInfoParam')
-  WatermarkReporterParam = _DoFnParam('WatermarkReporterParam')
+  WatermarkEstimatorParam = _WatermarkEstimatorParam
   BundleFinalizerParam = _BundleFinalizerParam
   KeyParam = _DoFnParam('KeyParam')
 
@@ -489,7 +569,7 @@ class DoFn(WithTypeHints, HasDisplayData, urns.RunnerApiFn):
   TimerParam = _TimerDoFnParam
 
   DoFnProcessParams = [ElementParam, SideInputParam, TimestampParam,
-                       WindowParam, WatermarkReporterParam, PaneInfoParam,
+                       WindowParam, WatermarkEstimatorParam, PaneInfoParam,
                        BundleFinalizerParam, KeyParam, StateParam, TimerParam]
 
   RestrictionParam = _RestrictionDoFnParam
@@ -522,7 +602,7 @@ class DoFn(WithTypeHints, HasDisplayData, urns.RunnerApiFn):
     ``DoFn.RestrictionParam``: an ``iobase.RestrictionTracker`` will be
     provided here to allow treatment as a Splittable ``DoFn``. The restriction
     tracker will be derived from the restriction provider in the parameter.
-    ``DoFn.WatermarkReporterParam``: a function that can be used to report
+    ``DoFn.WatermarkEstimatorParam``: a function that can be used to track
     output watermark of Splittable ``DoFn`` implementations.
 
     Args:
@@ -531,7 +611,7 @@ class DoFn(WithTypeHints, HasDisplayData, urns.RunnerApiFn):
       **kwargs: other keyword arguments.
 
     Returns:
-      An Iterable of output elements.
+      An Iterable of output elements or None.
     """
     raise NotImplementedError
 
@@ -583,10 +663,11 @@ class DoFn(WithTypeHints, HasDisplayData, urns.RunnerApiFn):
     fn_type_hints = typehints.decorators.IOTypeHints.from_callable(self.process)
     if fn_type_hints is not None:
       try:
-        fn_type_hints.strip_iterable()
+        fn_type_hints = fn_type_hints.strip_iterable()
       except ValueError as e:
         raise ValueError('Return value not iterable: %s: %s' % (self, e))
-    return fn_type_hints
+    # Prefer class decorator type hints for backwards compatibility.
+    return get_type_hints(self.__class__).with_defaults(fn_type_hints)
 
   # TODO(sourabhbajaj): Do we want to remove the responsibility of these from
   # the DoFn or maybe the runner
@@ -676,22 +757,14 @@ class CallableWrapperDoFn(DoFn):
 
   def default_type_hints(self):
     fn_type_hints = typehints.decorators.IOTypeHints.from_callable(self._fn)
-    if fn_type_hints is not None:
-      try:
-        fn_type_hints.strip_iterable()
-      except ValueError as e:
-        raise ValueError('Return value not iterable: %s: %s' % (self._fn, e))
     type_hints = get_type_hints(self._fn).with_defaults(fn_type_hints)
-    # If the fn was a DoFn annotated with a type-hint that hinted a return
-    # type compatible with Iterable[Any], then we strip off the outer
-    # container type due to the 'flatten' portion of FlatMap.
-    # TODO(robertwb): Should we require an iterable specification for FlatMap?
-    if type_hints.output_types:
-      args, kwargs = type_hints.output_types
-      if len(args) == 1 and is_consistent_with(
-          args[0], typehints.Iterable[typehints.Any]):
-        type_hints = type_hints.copy()
-        type_hints.set_output_types(element_type(args[0]), **kwargs)
+    # The fn's output type should be iterable. Strip off the outer
+    # container type due to the 'flatten' portion of FlatMap/ParDo.
+    try:
+      type_hints = type_hints.strip_iterable()
+    except ValueError as e:
+      # TODO(BEAM-8466): Raise exception here if using stricter type checking.
+      _LOGGER.warning('%s: %s', self.display_data()['fn'].value, e)
     return type_hints
 
   def infer_output_type(self, input_type):
@@ -854,6 +927,7 @@ class CombineFn(WithTypeHints, HasDisplayData, urns.RunnerApiFn):
 
   @staticmethod
   def maybe_from_callable(fn, has_side_inputs=True):
+    # type: (typing.Union[CombineFn, typing.Callable], bool) -> CombineFn
     if isinstance(fn, CombineFn):
       return fn
     elif callable(fn) and not has_side_inputs:
@@ -1039,6 +1113,7 @@ class PartitionFn(WithTypeHints):
     return self.__class__.__name__
 
   def partition_for(self, element, num_partitions, *args, **kwargs):
+    # type: (T, int, *typing.Any, **typing.Any) -> int
     """Specify which partition will receive this element.
 
     Args:
@@ -1078,6 +1153,7 @@ class CallableWrapperPartitionFn(PartitionFn):
     self._fn = fn
 
   def partition_for(self, element, num_partitions, *args, **kwargs):
+    # type: (T, int, *typing.Any, **typing.Any) -> int
     return self._fn(element, num_partitions, *args, **kwargs)
 
 
@@ -1099,8 +1175,8 @@ class ParDo(PTransformWithSideInputs):
   Args:
     pcoll (~apache_beam.pvalue.PCollection):
       a :class:`~apache_beam.pvalue.PCollection` to be processed.
-    fn (DoFn): a :class:`DoFn` object to be applied to each element
-      of **pcoll** argument.
+    fn (`typing.Union[DoFn, typing.Callable]`): a :class:`DoFn` object to be
+      applied to each element of **pcoll** argument, or a Callable.
     *args: positional arguments passed to the :class:`DoFn` object.
     **kwargs:  keyword arguments passed to the :class:`DoFn` object.
 
@@ -1117,7 +1193,7 @@ class ParDo(PTransformWithSideInputs):
     super(ParDo, self).__init__(fn, *args, **kwargs)
     # TODO(robertwb): Change all uses of the dofn attribute to use fn instead.
     self.dofn = self.fn
-    self.output_tags = set()
+    self.output_tags = set()  # type: typing.Set[str]
 
     if not isinstance(self.fn, DoFn):
       raise TypeError('ParDo must be called with a DoFn instance.')
@@ -1162,7 +1238,7 @@ class ParDo(PTransformWithSideInputs):
         key_coder = coders.registry.get_coder(typehints.Any)
 
       if not key_coder.is_deterministic():
-        logging.warning(
+        _LOGGER.warning(
             'Key coder %s for transform %s with stateful DoFn may not '
             'be deterministic. This may cause incorrect behavior for complex '
             'key types. Consider adding an input type hint for this transform.',
@@ -1212,6 +1288,7 @@ class ParDo(PTransformWithSideInputs):
     return self.fn, self.args, self.kwargs, si_tags_and_types, windowing
 
   def to_runner_api_parameter(self, context):
+    # type: (PipelineContext) -> typing.Tuple[str, message.Message]
     assert isinstance(self, ParDo), \
         "expected instance of ParDo, but got %s" % self.__class__
     picked_pardo_fn_data = pickler.dumps(self._pardo_fn_data())
@@ -1221,17 +1298,13 @@ class ParDo(PTransformWithSideInputs):
     if is_splittable:
       restriction_coder = (
           DoFnSignature(self.fn).get_restriction_provider().restriction_coder())
-      restriction_coder_id = context.coders.get_id(restriction_coder)
+      restriction_coder_id = context.coders.get_id(restriction_coder)  # type: typing.Optional[str]
     else:
       restriction_coder_id = None
     return (
         common_urns.primitives.PAR_DO.urn,
         beam_runner_api_pb2.ParDoPayload(
-            do_fn=beam_runner_api_pb2.SdkFunctionSpec(
-                environment_id=context.default_environment_id(),
-                spec=beam_runner_api_pb2.FunctionSpec(
-                    urn=python_urns.PICKLED_DOFN_INFO,
-                    payload=picked_pardo_fn_data)),
+            do_fn=beam_runner_api_pb2.FunctionSpec(urn=python_urns.PICKLED_DOFN_INFO, payload=picked_pardo_fn_data),
             splittable=is_splittable,
             restriction_coder_id=restriction_coder_id,
             state_specs={spec.name: spec.to_runner_api(context)
@@ -1250,9 +1323,9 @@ class ParDo(PTransformWithSideInputs):
   @PTransform.register_urn(
       common_urns.primitives.PAR_DO.urn, beam_runner_api_pb2.ParDoPayload)
   def from_runner_api_parameter(pardo_payload, context):
-    assert pardo_payload.do_fn.spec.urn == python_urns.PICKLED_DOFN_INFO
+    assert pardo_payload.do_fn.urn == python_urns.PICKLED_DOFN_INFO
     fn, args, kwargs, si_tags_and_types, windowing = pickler.loads(
-        pardo_payload.do_fn.spec.payload)
+        pardo_payload.do_fn.payload)
     if si_tags_and_types:
       raise NotImplementedError('explicit side input data')
     elif windowing:
@@ -1435,8 +1508,7 @@ def MapTuple(fn, *args, **kwargs):  # pylint: disable=invalid-name
 
   # Proxy the type-hint information from the original function to this new
   # wrapped function.
-  type_hints = get_type_hints(fn).with_defaults(
-      typehints.decorators.IOTypeHints.from_callable(fn))
+  type_hints = get_type_hints(fn)
   get_type_hints(wrapper).input_types = type_hints.input_types
   output_hint = type_hints.simple_output_type(label)
   if output_hint:
@@ -1506,8 +1578,7 @@ def FlatMapTuple(fn, *args, **kwargs):  # pylint: disable=invalid-name
 
   # Proxy the type-hint information from the original function to this new
   # wrapped function.
-  type_hints = get_type_hints(fn).with_defaults(
-      typehints.decorators.IOTypeHints.from_callable(fn))
+  type_hints = get_type_hints(fn)
   get_type_hints(wrapper).input_types = type_hints.input_types
   output_hint = type_hints.simple_output_type(label)
   if output_hint:
@@ -1553,10 +1624,16 @@ def Filter(fn, *args, **kwargs):  # pylint: disable=invalid-name
   # TODO: What about callable classes?
   if hasattr(fn, '__name__'):
     wrapper.__name__ = fn.__name__
+
+  # Get type hints from this instance or the callable. Do not use output type
+  # hints from the callable (which should be bool if set).
+  fn_type_hints = typehints.decorators.IOTypeHints.from_callable(fn)
+  if fn_type_hints is not None:
+    fn_type_hints.output_types = None
+  type_hints = get_type_hints(fn).with_defaults(fn_type_hints)
+
   # Proxy the type-hint information from the function being wrapped, setting the
   # output type to be the same as the input type.
-  type_hints = get_type_hints(fn).with_defaults(
-      typehints.decorators.IOTypeHints.from_callable(fn))
   get_type_hints(wrapper).input_types = type_hints.input_types
   output_hint = type_hints.simple_output_type(label)
   if (output_hint is None
@@ -1804,7 +1881,10 @@ class CombinePerKey(PTransformWithSideInputs):
       hints.set_output_types(typehints.Tuple[K, main_output_type])
     return hints
 
-  def to_runner_api_parameter(self, context):
+  def to_runner_api_parameter(self,
+                              context  # type: PipelineContext
+                             ):
+    # type: (...) -> typing.Tuple[str, beam_runner_api_pb2.CombinePayload]
     if self.args or self.kwargs:
       from apache_beam.transforms.combiners import curry_combine_fn
       combine_fn = curry_combine_fn(self.fn, self.args, self.kwargs)
@@ -1867,7 +1947,11 @@ class CombineValues(PTransformWithSideInputs):
 class CombineValuesDoFn(DoFn):
   """DoFn for performing per-key Combine transforms."""
 
-  def __init__(self, input_pcoll_type, combinefn, runtime_type_check):
+  def __init__(self,
+               input_pcoll_type,
+               combinefn,  # type: CombineFn
+               runtime_type_check,  # type: bool
+              ):
     super(CombineValuesDoFn, self).__init__()
     self.combinefn = combinefn
     self.runtime_type_check = runtime_type_check
@@ -1919,7 +2003,11 @@ class CombineValuesDoFn(DoFn):
 
 class _CombinePerKeyWithHotKeyFanout(PTransform):
 
-  def __init__(self, combine_fn, fanout):
+  def __init__(self,
+               combine_fn,  # type: CombineFn
+               fanout,  # type: typing.Union[int, typing.Callable[[typing.Any], int]]
+              ):
+    # type: (...) -> None
     self._combine_fn = combine_fn
     self._fanout_fn = (
         (lambda key: fanout) if isinstance(fanout, int) else fanout)
@@ -2026,7 +2114,7 @@ class GroupByKey(PTransform):
     def infer_output_type(self, input_type):
       key_type, value_type = trivial_inference.key_value_types(input_type)
       return typehints.Iterable[
-          typehints.KV[key_type, typehints.WindowedValue[value_type]]]
+          typehints.KV[key_type, typehints.WindowedValue[value_type]]]  # type: ignore[misc]
 
   def expand(self, pcoll):
     # This code path is only used in the local direct runner.  For Dataflow
@@ -2043,11 +2131,11 @@ class GroupByKey(PTransform):
           'GroupByKey operation "%s"' % self.label)
 
       reify_output_type = typehints.KV[
-          key_type, typehints.WindowedValue[value_type]]
+          key_type, typehints.WindowedValue[value_type]]  # type: ignore[misc]
       gbk_input_type = (
           typehints.KV[
               key_type,
-              typehints.Iterable[typehints.WindowedValue[value_type]]])
+              typehints.Iterable[typehints.WindowedValue[value_type]]])  # type: ignore[misc]
       gbk_output_type = typehints.KV[
           key_type, typehints.Iterable[value_type]]
 
@@ -2073,6 +2161,7 @@ class GroupByKey(PTransform):
     return typehints.KV[key_type, typehints.Iterable[value_type]]
 
   def to_runner_api_parameter(self, unused_context):
+    # type: (PipelineContext) -> typing.Tuple[str, None]
     return common_urns.primitives.GROUP_BY_KEY.urn, None
 
   @PTransform.register_urn(common_urns.primitives.GROUP_BY_KEY.urn, None)
@@ -2176,8 +2265,26 @@ class Partition(PTransformWithSideInputs):
 
 
 class Windowing(object):
-  def __init__(self, windowfn, triggerfn=None, accumulation_mode=None,
-               timestamp_combiner=None):
+  def __init__(self,
+               windowfn,  # type: WindowFn
+               triggerfn=None,  # type: typing.Optional[TriggerFn]
+               accumulation_mode=None,  # typing.Optional[beam_runner_api_pb2.AccumulationMode]
+               timestamp_combiner=None,  # typing.Optional[beam_runner_api_pb2.OutputTime]
+               allowed_lateness=0, # type: typing.Union[int, float]
+               ):
+    """Class representing the window strategy.
+
+    Args:
+      windowfn: Window assign function.
+      triggerfn: Trigger function.
+      accumulation_mode: a AccumulationMode, controls what to do with data
+        when a trigger fires multiple times.
+      timestamp_combiner: a TimestampCombiner, determines how output
+        timestamps of grouping operations are assigned.
+      allowed_lateness: Maximum delay in seconds after end of window
+        allowed for any late data to be processed without being discarded
+        directly.
+    """
     global AccumulationMode, DefaultTrigger  # pylint: disable=global-variable-not-assigned
     # pylint: disable=wrong-import-order, wrong-import-position
     from apache_beam.transforms.trigger import AccumulationMode, DefaultTrigger
@@ -2197,13 +2304,15 @@ class Windowing(object):
     self.windowfn = windowfn
     self.triggerfn = triggerfn
     self.accumulation_mode = accumulation_mode
+    self.allowed_lateness = Duration.of(allowed_lateness)
     self.timestamp_combiner = (
         timestamp_combiner or TimestampCombiner.OUTPUT_AT_EOW)
     self._is_default = (
         self.windowfn == GlobalWindows() and
         self.triggerfn == DefaultTrigger() and
         self.accumulation_mode == AccumulationMode.DISCARDING and
-        self.timestamp_combiner == TimestampCombiner.OUTPUT_AT_EOW)
+        self.timestamp_combiner == TimestampCombiner.OUTPUT_AT_EOW and
+        self.allowed_lateness == 0)
 
   def __repr__(self):
     return "Windowing(%s, %s, %s, %s)" % (self.windowfn, self.triggerfn,
@@ -2218,7 +2327,8 @@ class Windowing(object):
           self.windowfn == other.windowfn
           and self.triggerfn == other.triggerfn
           and self.accumulation_mode == other.accumulation_mode
-          and self.timestamp_combiner == other.timestamp_combiner)
+          and self.timestamp_combiner == other.timestamp_combiner
+          and self.allowed_lateness == other.allowed_lateness)
     return False
 
   def __ne__(self, other):
@@ -2226,13 +2336,15 @@ class Windowing(object):
     return not self == other
 
   def __hash__(self):
-    return hash((self.windowfn, self.accumulation_mode,
+    return hash((self.windowfn, self.triggerfn, self.accumulation_mode,
+                 self.allowed_lateness,
                  self.timestamp_combiner))
 
   def is_default(self):
     return self._is_default
 
   def to_runner_api(self, context):
+    # type: (PipelineContext) -> beam_runner_api_pb2.WindowingStrategy
     return beam_runner_api_pb2.WindowingStrategy(
         window_fn=self.windowfn.to_runner_api(context),
         # TODO(robertwb): Prohibit implicit multi-level merging.
@@ -2247,7 +2359,8 @@ class Windowing(object):
         # TODO(robertwb): Support EMIT_IF_NONEMPTY
         closing_behavior=beam_runner_api_pb2.ClosingBehavior.EMIT_ALWAYS,
         OnTimeBehavior=beam_runner_api_pb2.OnTimeBehavior.FIRE_ALWAYS,
-        allowed_lateness=0)
+        allowed_lateness=self.allowed_lateness.micros // 1000,
+        environment_id=context.default_environment_id())
 
   @staticmethod
   def from_runner_api(proto, context):
@@ -2257,7 +2370,8 @@ class Windowing(object):
         windowfn=WindowFn.from_runner_api(proto.window_fn, context),
         triggerfn=TriggerFn.from_runner_api(proto.trigger, context),
         accumulation_mode=proto.accumulation_mode,
-        timestamp_combiner=proto.output_time)
+        timestamp_combiner=proto.output_time,
+        allowed_lateness=Duration(micros=proto.allowed_lateness * 1000))
 
 
 @typehints.with_input_types(T)
@@ -2275,6 +2389,7 @@ class WindowInto(ParDo):
     """A DoFn that applies a WindowInto operation."""
 
     def __init__(self, windowing):
+      # type: (Windowing) -> None
       self.windowing = windowing
 
     def process(self, element, timestamp=DoFn.TimestampParam,
@@ -2285,10 +2400,11 @@ class WindowInto(ParDo):
       yield WindowedValue(element, context.timestamp, new_windows)
 
   def __init__(self,
-               windowfn,
-               trigger=None,
+               windowfn,  # type: typing.Union[Windowing, WindowFn]
+               trigger=None,  # type: typing.Optional[TriggerFn]
                accumulation_mode=None,
-               timestamp_combiner=None):
+               timestamp_combiner=None,
+               allowed_lateness=0):
     """Initializes a WindowInto transform.
 
     Args:
@@ -2310,10 +2426,12 @@ class WindowInto(ParDo):
       timestamp_combiner = timestamp_combiner or windowing.timestamp_combiner
 
     self.windowing = Windowing(
-        windowfn, trigger, accumulation_mode, timestamp_combiner)
+        windowfn, trigger, accumulation_mode, timestamp_combiner,
+        allowed_lateness)
     super(WindowInto, self).__init__(self.WindowIntoFn(self.windowing))
 
   def get_windowing(self, unused_inputs):
+    # type: (typing.Any) -> Windowing
     return self.windowing
 
   def infer_output_type(self, input_type):
@@ -2329,6 +2447,7 @@ class WindowInto(ParDo):
     return super(WindowInto, self).expand(pcoll)
 
   def to_runner_api_parameter(self, context):
+    # type: (PipelineContext) -> typing.Tuple[str, message.Message]
     return (
         common_urns.primitives.ASSIGN_WINDOWS.urn,
         self.windowing.to_runner_api(context))
@@ -2375,7 +2494,7 @@ class Flatten(PTransform):
 
   def __init__(self, **kwargs):
     super(Flatten, self).__init__()
-    self.pipeline = kwargs.pop('pipeline', None)
+    self.pipeline = kwargs.pop('pipeline', None)  # type: typing.Optional[Pipeline]
     if kwargs:
       raise ValueError('Unexpected keyword arguments: %s' % list(kwargs))
 
@@ -2397,12 +2516,14 @@ class Flatten(PTransform):
     return result
 
   def get_windowing(self, inputs):
+    # type: (typing.Any) -> Windowing
     if not inputs:
       # TODO(robertwb): Return something compatible with every windowing?
       return Windowing(GlobalWindows())
     return super(Flatten, self).get_windowing(inputs)
 
   def to_runner_api_parameter(self, context):
+    # type: (PipelineContext) -> typing.Tuple[str, None]
     return common_urns.primitives.FLATTEN.urn, None
 
   @staticmethod
@@ -2433,6 +2554,7 @@ class Create(PTransform):
     self.reshuffle = reshuffle
 
   def to_runner_api_parameter(self, context):
+    # type: (PipelineContext) -> typing.Tuple[str, bytes]
     # Required as this is identified by type in PTransformOverrides.
     # TODO(BEAM-3812): Use an actual URN here.
     return self.to_runner_api_pickled(context)
@@ -2449,40 +2571,35 @@ class Create(PTransform):
 
   def expand(self, pbegin):
     assert isinstance(pbegin, pvalue.PBegin)
-    # Must guard against this as some legacy runners don't implement impulse.
-    debug_options = pbegin.pipeline._options.view_as(DebugOptions)
-    fn_api = (debug_options.experiments
-              and 'beam_fn_api' in debug_options.experiments)
-    if fn_api:
-      coder = typecoders.registry.get_coder(self.get_output_type())
-      serialized_values = [coder.encode(v) for v in self.values]
-      reshuffle = self.reshuffle
-      # Avoid the "redistributing" reshuffle for 0 and 1 element Creates.
-      # These special cases are often used in building up more complex
-      # transforms (e.g. Write).
+    coder = typecoders.registry.get_coder(self.get_output_type())
+    serialized_values = [coder.encode(v) for v in self.values]
+    reshuffle = self.reshuffle
+    # Avoid the "redistributing" reshuffle for 0 and 1 element Creates.
+    # These special cases are often used in building up more complex
+    # transforms (e.g. Write).
 
-      class MaybeReshuffle(PTransform):
-        def expand(self, pcoll):
-          if len(serialized_values) > 1 and reshuffle:
-            from apache_beam.transforms.util import Reshuffle
-            return pcoll | Reshuffle()
-          else:
-            return pcoll
-      return (
-          pbegin
-          | Impulse()
-          | FlatMap(lambda _: serialized_values)
-          | MaybeReshuffle()
-          | Map(coder.decode).with_output_types(self.get_output_type()))
-    else:
-      self.pipeline = pbegin.pipeline
-      from apache_beam.io import iobase
-      coder = typecoders.registry.get_coder(self.get_output_type())
-      source = self._create_source_from_iterable(self.values, coder)
-      return (pbegin.pipeline
-              | iobase.Read(source).with_output_types(self.get_output_type()))
+    class MaybeReshuffle(PTransform):
+      def expand(self, pcoll):
+        if len(serialized_values) > 1 and reshuffle:
+          from apache_beam.transforms.util import Reshuffle
+          return pcoll | Reshuffle()
+        else:
+          return pcoll
+    return (
+        pbegin
+        | Impulse()
+        | FlatMap(lambda _: serialized_values).with_output_types(bytes)
+        | MaybeReshuffle().with_output_types(bytes)
+        | Map(coder.decode).with_output_types(self.get_output_type()))
+
+  def as_read(self):
+    from apache_beam.io import iobase
+    coder = typecoders.registry.get_coder(self.get_output_type())
+    source = self._create_source_from_iterable(self.values, coder)
+    return iobase.Read(source).with_output_types(self.get_output_type())
 
   def get_windowing(self, unused_inputs):
+    # type: (typing.Any) -> Windowing
     return Windowing(GlobalWindows())
 
   @staticmethod
@@ -2491,11 +2608,13 @@ class Create(PTransform):
 
   @staticmethod
   def _create_source(serialized_values, coder):
+    # type: (typing.Any, typing.Any) -> create_source._CreateSource
     from apache_beam.transforms.create_source import _CreateSource
 
     return _CreateSource(serialized_values, coder)
 
 
+@typehints.with_output_types(bytes)
 class Impulse(PTransform):
   """Impulse primitive."""
 
@@ -2506,12 +2625,14 @@ class Impulse(PTransform):
     return pvalue.PCollection(pbegin.pipeline)
 
   def get_windowing(self, inputs):
+    # type: (typing.Any) -> Windowing
     return Windowing(GlobalWindows())
 
   def infer_output_type(self, unused_input_type):
     return bytes
 
   def to_runner_api_parameter(self, unused_context):
+    # type: (PipelineContext) -> typing.Tuple[str, None]
     return common_urns.primitives.IMPULSE.urn, None
 
   @PTransform.register_urn(common_urns.primitives.IMPULSE.urn, None)

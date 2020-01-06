@@ -20,12 +20,15 @@
 from __future__ import absolute_import
 
 import collections
+import logging
 import sys
 import typing
 from builtins import next
 from builtins import range
 
 from apache_beam.typehints import typehints
+
+_LOGGER = logging.getLogger(__name__)
 
 # Describes an entry in the type map in convert_to_beam_type.
 # match is a function that takes a user type and returns whether the conversion
@@ -44,10 +47,24 @@ def _get_compatible_args(typ):
   # __union_params__ argument respectively.
   if (3, 0, 0) <= sys.version_info[0:3] < (3, 5, 3):
     if getattr(typ, '__tuple_params__', None) is not None:
-      return typ.__tuple_params__
+      if typ.__tuple_use_ellipsis__:
+        return typ.__tuple_params__ + (Ellipsis,)
+      else:
+        return typ.__tuple_params__
     elif getattr(typ, '__union_params__', None) is not None:
       return typ.__union_params__
   return None
+
+
+def _get_args(typ):
+  """Returns the index-th argument to the given type."""
+  try:
+    return typ.__args__
+  except AttributeError:
+    compatible_args = _get_compatible_args(typ)
+    if compatible_args is None:
+      raise
+    return compatible_args
 
 
 def _get_arg(typ, index):
@@ -105,6 +122,15 @@ def _match_same_type(match_against):
   return lambda user_type: type(user_type) == type(match_against)
 
 
+def _match_is_exactly_mapping(user_type):
+  # Avoid unintentionally catching all subtypes (e.g. strings and mappings).
+  if sys.version_info < (3, 7):
+    expected_origin = typing.Mapping
+  else:
+    expected_origin = collections.abc.Mapping
+  return getattr(user_type, '__origin__', None) is expected_origin
+
+
 def _match_is_exactly_iterable(user_type):
   # Avoid unintentionally catching all subtypes (e.g. strings and mappings).
   if sys.version_info < (3, 7):
@@ -117,6 +143,22 @@ def _match_is_exactly_iterable(user_type):
 def _match_is_named_tuple(user_type):
   return (_safe_issubclass(user_type, typing.Tuple) and
           hasattr(user_type, '_field_types'))
+
+
+def _match_is_optional(user_type):
+  return _match_is_union(user_type) and sum(
+      tp is type(None) for tp in _get_args(user_type)) == 1
+
+
+def extract_optional_type(user_type):
+  """Extracts the non-None type from Optional type user_type.
+
+  If user_type is not Optional, returns None
+  """
+  if not _match_is_optional(user_type):
+    return None
+  else:
+    return next(tp for tp in _get_args(user_type) if tp is not type(None))
 
 
 def _match_is_union(user_type):
@@ -140,14 +182,15 @@ def _match_is_union(user_type):
 
 # Mapping from typing.TypeVar/typehints.TypeVariable ids to an object of the
 # other type. Bidirectional mapping preserves typing.TypeVar instances.
-_type_var_cache = {}
+_type_var_cache = {}  # type: typing.Dict[int, typehints.TypeVariable]
 
 
 def convert_to_beam_type(typ):
   """Convert a given typing type to a Beam type.
 
   Args:
-    typ (type): typing type.
+    typ (`typing.Union[type, str]`): typing type or string literal representing
+      a type.
 
   Returns:
     type: The given type converted to a Beam type as far as we can do the
@@ -167,6 +210,11 @@ def convert_to_beam_type(typ):
       _type_var_cache[id(typ)] = new_type_variable
       _type_var_cache[id(new_type_variable)] = typ
     return _type_var_cache[id(typ)]
+  elif isinstance(typ, str):
+    # Special case for forward references.
+    # TODO(BEAM-8487): Currently unhandled.
+    _LOGGER.info('Converting string literal type hint to Any: "%s"', typ)
+    return typehints.Any
   elif getattr(typ, '__module__', None) != 'typing':
     # Only translate types from the typing module.
     return typ
@@ -215,8 +263,9 @@ def convert_to_beam_type(typ):
   # Find the first matching entry.
   matched_entry = next((entry for entry in type_map if entry.match(typ)), None)
   if not matched_entry:
-    # No match: return original type.
-    return typ
+    # Please add missing type support if you see this message.
+    _LOGGER.info('Using Any for unsupported type: %s', typ)
+    return typehints.Any
 
   if matched_entry.arity == -1:
     arity = _len_arg(typ)

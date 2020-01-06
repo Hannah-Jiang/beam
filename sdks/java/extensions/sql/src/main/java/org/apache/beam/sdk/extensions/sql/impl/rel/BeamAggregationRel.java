@@ -19,7 +19,7 @@ package org.apache.beam.sdk.extensions.sql.impl.rel;
 
 import static java.util.stream.Collectors.toList;
 import static org.apache.beam.sdk.values.PCollection.IsBounded.BOUNDED;
-import static org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.beam.vendor.calcite.v1_20_0.com.google.common.base.Preconditions.checkArgument;
 
 import java.io.Serializable;
 import java.util.List;
@@ -30,6 +30,7 @@ import org.apache.beam.sdk.extensions.sql.impl.transform.agg.AggregationCombineF
 import org.apache.beam.sdk.extensions.sql.impl.utils.CalciteUtils;
 import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.Schema.Field;
+import org.apache.beam.sdk.schemas.Schema.FieldType;
 import org.apache.beam.sdk.transforms.Combine.CombineFn;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.GroupByKey;
@@ -45,21 +46,20 @@ import org.apache.beam.sdk.transforms.windowing.Sessions;
 import org.apache.beam.sdk.transforms.windowing.SlidingWindows;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.transforms.windowing.WindowFn;
-import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionList;
 import org.apache.beam.sdk.values.Row;
 import org.apache.beam.sdk.values.WindowingStrategy;
+import org.apache.beam.vendor.calcite.v1_20_0.org.apache.calcite.plan.RelOptCluster;
+import org.apache.beam.vendor.calcite.v1_20_0.org.apache.calcite.plan.RelOptPlanner;
+import org.apache.beam.vendor.calcite.v1_20_0.org.apache.calcite.plan.RelTraitSet;
+import org.apache.beam.vendor.calcite.v1_20_0.org.apache.calcite.rel.RelNode;
+import org.apache.beam.vendor.calcite.v1_20_0.org.apache.calcite.rel.RelWriter;
+import org.apache.beam.vendor.calcite.v1_20_0.org.apache.calcite.rel.core.Aggregate;
+import org.apache.beam.vendor.calcite.v1_20_0.org.apache.calcite.rel.core.AggregateCall;
+import org.apache.beam.vendor.calcite.v1_20_0.org.apache.calcite.rel.metadata.RelMetadataQuery;
+import org.apache.beam.vendor.calcite.v1_20_0.org.apache.calcite.util.ImmutableBitSet;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Lists;
-import org.apache.calcite.plan.RelOptCluster;
-import org.apache.calcite.plan.RelOptPlanner;
-import org.apache.calcite.plan.RelTraitSet;
-import org.apache.calcite.rel.RelNode;
-import org.apache.calcite.rel.RelWriter;
-import org.apache.calcite.rel.core.Aggregate;
-import org.apache.calcite.rel.core.AggregateCall;
-import org.apache.calcite.rel.metadata.RelMetadataQuery;
-import org.apache.calcite.util.ImmutableBitSet;
 import org.joda.time.Duration;
 
 /** {@link BeamRelNode} to replace a {@link Aggregate} node. */
@@ -71,14 +71,13 @@ public class BeamAggregationRel extends Aggregate implements BeamRelNode {
       RelOptCluster cluster,
       RelTraitSet traits,
       RelNode child,
-      boolean indicator,
       ImmutableBitSet groupSet,
       List<ImmutableBitSet> groupSets,
       List<AggregateCall> aggCalls,
       @Nullable WindowFn<Row, IntervalWindow> windowFn,
       int windowFieldIndex) {
 
-    super(cluster, traits, child, indicator, groupSet, groupSets, aggCalls);
+    super(cluster, traits, child, groupSet, groupSets, aggCalls);
 
     this.windowFn = windowFn;
     this.windowFieldIndex = windowFieldIndex;
@@ -262,18 +261,26 @@ public class BeamAggregationRel extends Aggregate implements BeamRelNode {
         }
       }
 
-      PTransform<PCollection<Row>, PCollection<KV<Row, Row>>> combiner = combined;
+      PTransform<PCollection<Row>, PCollection<Row>> combiner = combined;
+      boolean ignoreValues = false;
       if (combiner == null) {
         // If no field aggregations were specified, we run a constant combiner that always returns
         // a single empty row for each key. This is used by the SELECT DISTINCT query plan - in this
         // case a group by is generated to determine unique keys, and a constant null combiner is
         // used.
-        combiner = byFields.aggregate(AggregationCombineFnAdapter.createConstantCombineFn());
+        combiner =
+            byFields.aggregateField(
+                "*",
+                AggregationCombineFnAdapter.createConstantCombineFn(),
+                Field.of(
+                    "e",
+                    FieldType.row(AggregationCombineFnAdapter.EMPTY_SCHEMA).withNullable(true)));
+        ignoreValues = true;
       }
 
       return windowedStream
           .apply(combiner)
-          .apply("mergeRecord", ParDo.of(mergeRecord(outputSchema, windowFieldIndex)))
+          .apply("mergeRecord", ParDo.of(mergeRecord(outputSchema, windowFieldIndex, ignoreValues)))
           .setRowSchema(outputSchema);
     }
 
@@ -314,17 +321,20 @@ public class BeamAggregationRel extends Aggregate implements BeamRelNode {
       }
     }
 
-    static DoFn<KV<Row, Row>, Row> mergeRecord(Schema outputSchema, int windowStartFieldIndex) {
-      return new DoFn<KV<Row, Row>, Row>() {
+    static DoFn<Row, Row> mergeRecord(
+        Schema outputSchema, int windowStartFieldIndex, boolean ignoreValues) {
+      return new DoFn<Row, Row>() {
         @ProcessElement
         public void processElement(
-            @Element KV<Row, Row> kvRow, BoundedWindow window, OutputReceiver<Row> o) {
+            @Element Row kvRow, BoundedWindow window, OutputReceiver<Row> o) {
           List<Object> fieldValues =
               Lists.newArrayListWithCapacity(
-                  kvRow.getKey().getValues().size() + kvRow.getValue().getValues().size());
+                  kvRow.getRow(0).getValues().size() + kvRow.getRow(1).getValues().size());
 
-          fieldValues.addAll(kvRow.getKey().getValues());
-          fieldValues.addAll(kvRow.getValue().getValues());
+          fieldValues.addAll(kvRow.getRow(0).getValues());
+          if (!ignoreValues) {
+            fieldValues.addAll(kvRow.getRow(1).getValues());
+          }
 
           if (windowStartFieldIndex != -1) {
             fieldValues.add(windowStartFieldIndex, ((IntervalWindow) window).start());
@@ -344,14 +354,6 @@ public class BeamAggregationRel extends Aggregate implements BeamRelNode {
       List<ImmutableBitSet> groupSets,
       List<AggregateCall> aggCalls) {
     return new BeamAggregationRel(
-        getCluster(),
-        traitSet,
-        input,
-        indicator,
-        groupSet,
-        groupSets,
-        aggCalls,
-        windowFn,
-        windowFieldIndex);
+        getCluster(), traitSet, input, groupSet, groupSets, aggCalls, windowFn, windowFieldIndex);
   }
 }

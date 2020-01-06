@@ -23,6 +23,9 @@ import sys
 import typing
 import unittest
 
+# patches unittest.TestCase to be python3 compatible
+import future.tests.base  # pylint: disable=unused-import
+
 import apache_beam as beam
 from apache_beam import pvalue
 from apache_beam import typehints
@@ -89,12 +92,12 @@ class MainInputTest(unittest.TestCase):
     result = [1, 2, 3] | beam.ParDo(MyDoFn())
     self.assertEqual(['1', '2', '3'], sorted(result))
 
-    with self.assertRaisesRegexp(typehints.TypeCheckError,
-                                 r'requires.*int.*got.*str'):
+    with self.assertRaisesRegex(typehints.TypeCheckError,
+                                r'requires.*int.*got.*str'):
       ['a', 'b', 'c'] | beam.ParDo(MyDoFn())
 
-    with self.assertRaisesRegexp(typehints.TypeCheckError,
-                                 r'requires.*int.*got.*str'):
+    with self.assertRaisesRegex(typehints.TypeCheckError,
+                                r'requires.*int.*got.*str'):
       [1, 2, 3] | (beam.ParDo(MyDoFn()) | 'again' >> beam.ParDo(MyDoFn()))
 
   @unittest.skip('BEAM-7981: Iterable in output type should not be removed.')
@@ -130,6 +133,76 @@ class MainInputTest(unittest.TestCase):
       return data % 2
 
     self.assertEqual([1, 3], [1, 2, 3] | beam.Filter(filter_fn))
+
+  def test_partition(self):
+    p = TestPipeline()
+    even, odd = (p
+                 | beam.Create([1, 2, 3])
+                 | 'even_odd' >> beam.Partition(lambda e, _: e % 2, 2))
+    self.assertIsNotNone(even.element_type)
+    self.assertIsNotNone(odd.element_type)
+    res_even = (even
+                | 'id_even' >> beam.ParDo(lambda e: [e]).with_input_types(int))
+    res_odd = (odd
+               | 'id_odd' >> beam.ParDo(lambda e: [e]).with_input_types(int))
+    assert_that(res_even, equal_to([2]), label='even_check')
+    assert_that(res_odd, equal_to([1, 3]), label='odd_check')
+    p.run()
+
+  def test_typed_dofn_multi_output(self):
+    class MyDoFn(beam.DoFn):
+      def process(self, element):
+        if element % 2:
+          yield beam.pvalue.TaggedOutput('odd', element)
+        else:
+          yield beam.pvalue.TaggedOutput('even', element)
+
+    p = TestPipeline()
+    res = (p
+           | beam.Create([1, 2, 3])
+           | beam.ParDo(MyDoFn()).with_outputs('odd', 'even'))
+    self.assertIsNotNone(res[None].element_type)
+    self.assertIsNotNone(res['even'].element_type)
+    self.assertIsNotNone(res['odd'].element_type)
+    res_main = (res[None]
+                | 'id_none' >> beam.ParDo(lambda e: [e]).with_input_types(int))
+    res_even = (res['even']
+                | 'id_even' >> beam.ParDo(lambda e: [e]).with_input_types(int))
+    res_odd = (res['odd']
+               | 'id_odd' >> beam.ParDo(lambda e: [e]).with_input_types(int))
+    assert_that(res_main, equal_to([]), label='none_check')
+    assert_that(res_even, equal_to([2]), label='even_check')
+    assert_that(res_odd, equal_to([1, 3]), label='odd_check')
+    p.run()
+
+    with self.assertRaises(ValueError):
+      _ = res['undeclared tag']
+
+  def test_typed_dofn_multi_output_no_tags(self):
+    class MyDoFn(beam.DoFn):
+      def process(self, element):
+        if element % 2:
+          yield beam.pvalue.TaggedOutput('odd', element)
+        else:
+          yield beam.pvalue.TaggedOutput('even', element)
+
+    p = TestPipeline()
+    res = (p
+           | beam.Create([1, 2, 3])
+           | beam.ParDo(MyDoFn()).with_outputs())
+    self.assertIsNotNone(res[None].element_type)
+    self.assertIsNotNone(res['even'].element_type)
+    self.assertIsNotNone(res['odd'].element_type)
+    res_main = (res[None]
+                | 'id_none' >> beam.ParDo(lambda e: [e]).with_input_types(int))
+    res_even = (res['even']
+                | 'id_even' >> beam.ParDo(lambda e: [e]).with_input_types(int))
+    res_odd = (res['odd']
+               | 'id_odd' >> beam.ParDo(lambda e: [e]).with_input_types(int))
+    assert_that(res_main, equal_to([]), label='none_check')
+    assert_that(res_even, equal_to([2]), label='even_check')
+    assert_that(res_odd, equal_to([1, 3]), label='odd_check')
+    p.run()
 
 
 class NativeTypesTest(unittest.TestCase):
@@ -186,8 +259,8 @@ class SideInputTest(unittest.TestCase):
       ['a', 'bb', 'c'] | beam.Map(repeat, 3, 4)
     if all(param.default == param.empty
            for param in get_signature(repeat).parameters.values()):
-      with self.assertRaisesRegexp(typehints.TypeCheckError,
-                                   r'(takes exactly|missing a required)'):
+      with self.assertRaisesRegex(typehints.TypeCheckError,
+                                  r'(takes exactly|missing a required)'):
         ['a', 'bb', 'c'] | beam.Map(repeat)
 
   def test_basic_side_input_hint(self):
@@ -225,7 +298,7 @@ class SideInputTest(unittest.TestCase):
     self.assertEqual(['aaa', 'bbbbbb', 'ccc'], sorted(result))
 
     if sys.version_info >= (3,):
-      with self.assertRaisesRegexp(
+      with self.assertRaisesRegex(
           typehints.TypeCheckError,
           r'requires Tuple\[int, ...\] but got Tuple\[str, ...\]'):
         ['a', 'bb', 'c'] | beam.Map(repeat, 'z')
@@ -248,7 +321,7 @@ class SideInputTest(unittest.TestCase):
     self.assertEqual([('a', 5), ('b', 5), ('c', 5)], sorted(result))
 
     if sys.version_info >= (3,):
-      with self.assertRaisesRegexp(
+      with self.assertRaisesRegex(
           typehints.TypeCheckError,
           r'requires Tuple\[Union\[int, str\], ...\] but got '
           r'Tuple\[Union\[float, int\], ...\]'):
@@ -264,7 +337,7 @@ class SideInputTest(unittest.TestCase):
                      sorted(result))
 
     if sys.version_info >= (3,):
-      with self.assertRaisesRegexp(
+      with self.assertRaisesRegex(
           typehints.TypeCheckError,
           r'requires Dict\[str, str\] but got Dict\[str, int\]'):
         _ = (['a', 'b', 'c']

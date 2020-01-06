@@ -21,6 +21,7 @@
 class CommonTestProperties {
     enum SDK {
         PYTHON,
+        PYTHON_37,
         JAVA
     }
 
@@ -35,10 +36,15 @@ class CommonTestProperties {
                 JAVA: [
                         DATAFLOW: ":runners:google-cloud-dataflow-java",
                         SPARK: ":runners:spark",
-                        FLINK: ":runners:flink:1.5",
+                        FLINK: ":runners:flink:1.9",
                         DIRECT: ":runners:direct-java"
                 ],
                 PYTHON: [
+                        DATAFLOW: "TestDataflowRunner",
+                        DIRECT: "DirectRunner",
+                        PORTABLE: "PortableRunner"
+                ],
+                PYTHON_37: [
                         DATAFLOW: "TestDataflowRunner",
                         DIRECT: "DirectRunner",
                         PORTABLE: "PortableRunner"
@@ -51,8 +57,7 @@ class CommonTestProperties {
             this.option = option
         }
 
-
-        String getDepenedencyBySDK(SDK sdk) {
+        String getDependencyBySDK(SDK sdk) {
             RUNNER_DEPENDENCY_MAP.get(sdk.toString()).get(this.toString())
         }
 

@@ -25,6 +25,8 @@ import re
 import time
 import unittest
 
+# patches unittest.TestCase to be python3 compatible
+import future.tests.base  # pylint: disable=unused-import,ungrouped-imports
 import mock
 from future.utils import iteritems
 
@@ -193,6 +195,35 @@ class TestBigQueryWrapper(unittest.TestCase):
                 name='b', type='BOOLEAN', mode='REQUIRED')
         ]), False, False)
     self.assertEqual(new_table, 'table_id')
+
+  def test_wait_for_job_returns_true_when_job_is_done(self):
+    def make_response(state):
+      m = mock.Mock()
+      m.status.errorResult = None
+      m.status.state = state
+      return m
+
+    client, job_ref = mock.Mock(), mock.Mock()
+    wrapper = beam.io.gcp.bigquery_tools.BigQueryWrapper(client)
+    # Return 'DONE' the second time get_job is called.
+    wrapper.get_job = mock.Mock(side_effect=[make_response('RUNNING'),
+                                             make_response('DONE')])
+
+    result = wrapper.wait_for_bq_job(job_ref, sleep_duration_sec=0,
+                                     max_retries=5)
+    self.assertTrue(result)
+
+  def test_wait_for_job_retries_fail(self):
+    client, response, job_ref = mock.Mock(), mock.Mock(), mock.Mock()
+    response.status.state = 'RUNNING'
+    wrapper = beam.io.gcp.bigquery_tools.BigQueryWrapper(client)
+    # Return 'RUNNING' response forever.
+    wrapper.get_job = lambda *args: response
+
+    with self.assertRaises(RuntimeError) as context:
+      wrapper.wait_for_bq_job(job_ref, sleep_duration_sec=0, max_retries=5)
+    self.assertEqual('The maximum number of retries has been reached',
+                     str(context.exception))
 
 
 @unittest.skipIf(HttpError is None, 'GCP dependencies are not installed')
@@ -369,14 +400,14 @@ class TestBigQueryReader(unittest.TestCase):
     self.assertFalse(reader.flatten_results)
 
   def test_using_both_query_and_table_fails(self):
-    with self.assertRaisesRegexp(
+    with self.assertRaisesRegex(
         ValueError,
         r'Both a BigQuery table and a query were specified\. Please specify '
         r'only one of these'):
       beam.io.BigQuerySource(table='dataset.table', query='query')
 
   def test_using_neither_query_nor_table_fails(self):
-    with self.assertRaisesRegexp(
+    with self.assertRaisesRegex(
         ValueError, r'A BigQuery table or a query must be specified'):
       beam.io.BigQuerySource()
 
@@ -459,7 +490,7 @@ class TestBigQueryWriter(unittest.TestCase):
     client.tables.Get.side_effect = HttpError(
         response={'status': '404'}, url='', content='')
     create_disposition = beam.io.BigQueryDisposition.CREATE_NEVER
-    with self.assertRaisesRegexp(
+    with self.assertRaisesRegex(
         RuntimeError, r'Table project:dataset\.table not found but create '
                       r'disposition is CREATE_NEVER'):
       with beam.io.BigQuerySink(
@@ -492,7 +523,7 @@ class TestBigQueryWriter(unittest.TestCase):
     client.tables.Get.side_effect = HttpError(
         response={'status': '404'}, url='', content='')
     create_disposition = beam.io.BigQueryDisposition.CREATE_IF_NEEDED
-    with self.assertRaisesRegexp(
+    with self.assertRaisesRegex(
         RuntimeError, r'Table project:dataset\.table requires a schema\. None '
                       r'can be inferred because the table does not exist'):
       with beam.io.BigQuerySink(
@@ -510,7 +541,7 @@ class TestBigQueryWriter(unittest.TestCase):
         schema=bigquery.TableSchema())
     client.tabledata.List.return_value = bigquery.TableDataList(totalRows=1)
     write_disposition = beam.io.BigQueryDisposition.WRITE_EMPTY
-    with self.assertRaisesRegexp(
+    with self.assertRaisesRegex(
         RuntimeError, r'Table project:dataset\.table is not empty but write '
                       r'disposition is WRITE_EMPTY'):
       with beam.io.BigQuerySink(
@@ -640,7 +671,7 @@ class TestRowAsDictJsonCoder(unittest.TestCase):
     self.assertEqual(output_value, coder.decode(coder.encode(test_value)))
 
   def json_compliance_exception(self, value):
-    with self.assertRaisesRegexp(ValueError, re.escape(JSON_COMPLIANCE_ERROR)):
+    with self.assertRaisesRegex(ValueError, re.escape(JSON_COMPLIANCE_ERROR)):
       coder = RowAsDictJsonCoder()
       test_value = {'s': value}
       coder.decode(coder.encode(test_value))

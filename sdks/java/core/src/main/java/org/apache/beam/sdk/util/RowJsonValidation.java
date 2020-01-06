@@ -59,8 +59,13 @@ class RowJsonValidation {
       return;
     }
 
+    if (fieldTypeName.isLogicalType()) {
+      verifyFieldTypeSupported(fieldType.getLogicalType().getBaseType());
+      return;
+    }
+
     if (!SUPPORTED_TYPES.contains(fieldTypeName)) {
-      throw new RowJsonDeserializer.UnsupportedRowJsonException(
+      throw new RowJson.RowJsonDeserializer.UnsupportedRowJsonException(
           fieldTypeName.name()
               + " is not supported when converting JSON objects to Rows. "
               + "Supported types are: "

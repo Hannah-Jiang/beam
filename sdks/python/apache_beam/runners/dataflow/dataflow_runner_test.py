@@ -26,7 +26,10 @@ from builtins import object
 from builtins import range
 from datetime import datetime
 
+# patches unittest.TestCase to be python3 compatible
+import future.tests.base  # pylint: disable=unused-import
 import mock
+import pytest
 
 import apache_beam as beam
 import apache_beam.transforms as ptransform
@@ -44,6 +47,7 @@ from apache_beam.runners.dataflow.dataflow_runner import DataflowPipelineResult
 from apache_beam.runners.dataflow.dataflow_runner import DataflowRuntimeException
 from apache_beam.runners.dataflow.internal.clients import dataflow as dataflow_api
 from apache_beam.runners.runner import PipelineState
+from apache_beam.testing.extra_assertions import ExtraAssertionsMixin
 from apache_beam.testing.test_pipeline import TestPipeline
 from apache_beam.transforms import window
 from apache_beam.transforms.core import Windowing
@@ -56,12 +60,35 @@ from apache_beam.typehints import typehints
 try:
   from apache_beam.runners.dataflow.internal import apiclient
 except ImportError:
-  apiclient = None
+  apiclient = None  # type: ignore
 # pylint: enable=wrong-import-order, wrong-import-position
+
+# SpecialParDo and SpecialDoFn are used in test_remote_runner_display_data.
+# Due to BEAM-8482, these need to be declared outside of the test method.
+# TODO: Should not subclass ParDo. Switch to PTransform as soon as
+# composite transforms support display data.
+class SpecialParDo(beam.ParDo):
+  def __init__(self, fn, now):
+    super(SpecialParDo, self).__init__(fn)
+    self.fn = fn
+    self.now = now
+
+  # Make this a list to be accessible within closure
+  def display_data(self):
+    return {'asubcomponent': self.fn,
+            'a_class': SpecialParDo,
+            'a_time': self.now}
+
+class SpecialDoFn(beam.DoFn):
+  def display_data(self):
+    return {'dofn_value': 42}
+
+  def process(self):
+    pass
 
 
 @unittest.skipIf(apiclient is None, 'GCP dependencies are not installed')
-class DataflowRunnerTest(unittest.TestCase):
+class DataflowRunnerTest(unittest.TestCase, ExtraAssertionsMixin):
   def setUp(self):
     self.default_properties = [
         '--dataflow_endpoint=ignored',
@@ -69,7 +96,7 @@ class DataflowRunnerTest(unittest.TestCase):
         '--project=test-project',
         '--staging_location=ignored',
         '--temp_location=/dev/null',
-        '--no_auth=True',
+        '--no_auth',
         '--dry_run=True']
 
   @mock.patch('time.sleep', return_value=None)
@@ -96,7 +123,7 @@ class DataflowRunnerTest(unittest.TestCase):
         self.dataflow_client.list_messages = mock.MagicMock(
             return_value=([], None))
 
-    with self.assertRaisesRegexp(
+    with self.assertRaisesRegex(
         DataflowRuntimeException, 'Dataflow pipeline failed. State: FAILED'):
       failed_runner = MockDataflowRunner([values_enum.JOB_STATE_FAILED])
       failed_result = DataflowPipelineResult(failed_runner.job, failed_runner)
@@ -127,7 +154,7 @@ class DataflowRunnerTest(unittest.TestCase):
       self.assertEqual(result, PipelineState.RUNNING)
 
     with mock.patch('time.time', mock.MagicMock(side_effect=[1, 1, 2, 2, 3])):
-      with self.assertRaisesRegexp(
+      with self.assertRaisesRegex(
           DataflowRuntimeException,
           'Dataflow pipeline failed. State: CANCELLED'):
         duration_failed_runner = MockDataflowRunner(
@@ -153,7 +180,7 @@ class DataflowRunnerTest(unittest.TestCase):
         self.dataflow_client.list_messages = mock.MagicMock(
             return_value=([], None))
 
-    with self.assertRaisesRegexp(
+    with self.assertRaisesRegex(
         DataflowRuntimeException, 'Failed to cancel job'):
       failed_runner = MockDataflowRunner(values_enum.JOB_STATE_RUNNING, False)
       failed_result = DataflowPipelineResult(failed_runner.job, failed_runner)
@@ -211,62 +238,44 @@ class DataflowRunnerTest(unittest.TestCase):
     p | ptransform.Create([1])  # pylint: disable=expression-not-assigned
     p.run()
     job_dict = json.loads(str(remote_runner.job))
-    self.assertEqual(len(job_dict[u'steps']), 2)
+    self.assertEqual(len(job_dict[u'steps']), 3)
 
     self.assertEqual(job_dict[u'steps'][0][u'kind'], u'ParallelRead')
     self.assertEqual(
         job_dict[u'steps'][0][u'properties'][u'pubsub_subscription'],
         '_starting_signal/')
     self.assertEqual(job_dict[u'steps'][1][u'kind'], u'ParallelDo')
+    self.assertEqual(job_dict[u'steps'][2][u'kind'], u'ParallelDo')
 
   def test_biqquery_read_streaming_fail(self):
     remote_runner = DataflowRunner()
     self.default_properties.append("--streaming")
     p = Pipeline(remote_runner, PipelineOptions(self.default_properties))
     _ = p | beam.io.Read(beam.io.BigQuerySource('some.table'))
-    with self.assertRaisesRegexp(ValueError,
-                                 r'source is not currently available'):
+    with self.assertRaisesRegex(ValueError,
+                                r'source is not currently available'):
       p.run()
 
+  # TODO(BEAM-8095): Segfaults in Python 3.7 with xdist.
+  @pytest.mark.no_xdist
   def test_remote_runner_display_data(self):
     remote_runner = DataflowRunner()
     p = Pipeline(remote_runner,
                  options=PipelineOptions(self.default_properties))
-
-    # TODO: Should not subclass ParDo. Switch to PTransform as soon as
-    # composite transforms support display data.
-    class SpecialParDo(beam.ParDo):
-      def __init__(self, fn, now):
-        super(SpecialParDo, self).__init__(fn)
-        self.fn = fn
-        self.now = now
-
-      # Make this a list to be accessible within closure
-      def display_data(self):
-        return {'asubcomponent': self.fn,
-                'a_class': SpecialParDo,
-                'a_time': self.now}
-
-    class SpecialDoFn(beam.DoFn):
-      def display_data(self):
-        return {'dofn_value': 42}
-
-      def process(self):
-        pass
 
     now = datetime.now()
     # pylint: disable=expression-not-assigned
     (p | ptransform.Create([1, 2, 3, 4, 5])
      | 'Do' >> SpecialParDo(SpecialDoFn(), now))
 
-    p.run()
+    # TODO(BEAM-366) Enable runner API on this test.
+    p.run(test_runner_api=False)
     job_dict = json.loads(str(remote_runner.job))
     steps = [step
              for step in job_dict['steps']
              if len(step['properties'].get('display_data', [])) > 0]
     step = steps[1]
     disp_data = step['properties']['display_data']
-    disp_data = sorted(disp_data, key=lambda x: x['namespace']+x['key'])
     nspace = SpecialParDo.__module__+ '.'
     expected_data = [{'type': 'TIMESTAMP', 'namespace': nspace+'SpecialParDo',
                       'value': DisplayDataItem._format_value(now, 'TIMESTAMP'),
@@ -276,9 +285,7 @@ class DataflowRunnerTest(unittest.TestCase):
                       'shortValue': 'SpecialParDo'},
                      {'type': 'INTEGER', 'namespace': nspace+'SpecialDoFn',
                       'value': 42, 'key': 'dofn_value'}]
-    expected_data = sorted(expected_data, key=lambda x: x['namespace']+x['key'])
-    self.assertEqual(len(disp_data), 3)
-    self.assertEqual(disp_data, expected_data)
+    self.assertUnhashableCountEqual(disp_data, expected_data)
 
   def test_no_group_by_key_directly_after_bigquery(self):
     remote_runner = DataflowRunner()
@@ -289,7 +296,7 @@ class DataflowRunnerTest(unittest.TestCase):
                      '--project=test-project',
                      '--staging_location=ignored',
                      '--temp_location=/dev/null',
-                     '--no_auth=True'
+                     '--no_auth'
                  ]))
     rows = p | beam.io.Read(beam.io.BigQuerySource('dataset.faketable'))
     with self.assertRaises(ValueError,
@@ -326,7 +333,7 @@ class DataflowRunnerTest(unittest.TestCase):
           r"Input to 'label' must be compatible with KV\[Any, Any\]. "
           "Found .*")
       for pcoll in [pcoll1, pcoll2]:
-        with self.assertRaisesRegexp(ValueError, err_msg):
+        with self.assertRaisesRegex(ValueError, err_msg):
           DataflowRunner.group_by_key_input_visitor().visit_transform(
               AppliedPTransform(None, transform, "label", [pcoll]))
 

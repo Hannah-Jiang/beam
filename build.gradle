@@ -19,7 +19,7 @@
 plugins {
   id 'base'
   // Enable publishing build scans
-  id 'com.gradle.build-scan' version '2.4' apply false
+  id 'com.gradle.build-scan' version '2.3' apply false
   // This plugin provides a task to determine which dependencies have updates.
   // Additionally, the plugin checks for updates to Gradle itself.
   //
@@ -96,15 +96,18 @@ rat {
     "ownership/**/*",
     "**/OWNERS",
 
-    // FIXME add license header
-    "project-mappings",
-    "deprecation-warning.txt",
-
     // Json doesn't support comments.
     "**/*.json",
-      
+
     // Katas files
-    "learning/katas/*/IO/**/*.txt"
+    "learning/katas/**/course-remote-info.yaml",
+    "learning/katas/**/section-remote-info.yaml",
+    "learning/katas/**/lesson-remote-info.yaml",
+    "learning/katas/**/task-remote-info.yaml",
+    "learning/katas/*/IO/**/*.txt",
+
+    // Mockito extensions
+    "sdks/java/io/amazon-web-services2/src/test/resources/mockito-extensions/org.mockito.plugins.MockMaker"
   ]
 
   // Add .gitignore excludes to the Apache Rat exclusion list. We re-create the behavior
@@ -140,8 +143,13 @@ task javaPreCommit() {
   dependsOn ":runners:direct-java:needsRunnerTests"
 }
 
+task sqlPreCommit() {
+  dependsOn ":sdks:java:extensions:sql:build"
+  dependsOn ":sdks:java:extensions:sql:buildDependents"
+}
+
 task javaPreCommitBeamZetaSQL() {
-  dependsOn ":sdks:java:extensions:sql:runZetaSQLTest"
+  dependsOn ":sdks:java:extensions:sql:zetasql:test"
 }
 
 task javaPreCommitPortabilityApi() {
@@ -194,6 +202,7 @@ task goIntegrationTests() {
 }
 
 task pythonPreCommit() {
+  dependsOn ":sdks:python:test-suites:tox:pycommon:preCommitPyCommon"
   dependsOn ":sdks:python:test-suites:tox:py2:preCommitPy2"
   dependsOn ":sdks:python:test-suites:tox:py35:preCommitPy35"
   dependsOn ":sdks:python:test-suites:tox:py36:preCommitPy36"
@@ -205,28 +214,37 @@ task pythonPreCommit() {
   // have caught. Note that the same tests will still run in postcommit.
 }
 
+task pythonLintPreCommit() {
+  dependsOn ":sdks:python:test-suites:tox:py2:lint"
+  dependsOn ":sdks:python:test-suites:tox:py37:lint"
+}
+
 task python2PostCommit() {
   dependsOn ":sdks:python:test-suites:portable:py2:crossLanguageTests"
   dependsOn ":sdks:python:test-suites:dataflow:py2:postCommitIT"
   dependsOn ":sdks:python:test-suites:direct:py2:directRunnerIT"
   dependsOn ":sdks:python:test-suites:direct:py2:hdfsIntegrationTest"
   dependsOn ":sdks:python:test-suites:direct:py2:mongodbioIT"
+  dependsOn ":sdks:python:test-suites:portable:py2:postCommitPy2"
 }
 
 task python35PostCommit() {
   dependsOn ":sdks:python:test-suites:dataflow:py35:postCommitIT"
   dependsOn ":sdks:python:test-suites:direct:py35:postCommitIT"
+  dependsOn ":sdks:python:test-suites:portable:py35:postCommitPy35"
 }
 
 task python36PostCommit() {
   dependsOn ":sdks:python:test-suites:dataflow:py36:postCommitIT"
   dependsOn ":sdks:python:test-suites:direct:py36:postCommitIT"
+  dependsOn ":sdks:python:test-suites:portable:py36:postCommitPy36"
 }
 
 task python37PostCommit() {
   dependsOn ":sdks:python:test-suites:dataflow:py37:postCommitIT"
   dependsOn ":sdks:python:test-suites:direct:py37:postCommitIT"
   dependsOn ":sdks:python:test-suites:direct:py37:hdfsIntegrationTest"
+  dependsOn ":sdks:python:test-suites:portable:py37:postCommitPy37"
 }
 
 task portablePythonPreCommit() {
@@ -266,5 +284,43 @@ release {
   git {
     requireBranch = 'release-.*|master'
     pushToRemote = ''
+  }
+}
+
+// Reports linkage errors across multiple Apache Beam artifact ids.
+//
+// To use (from the root of project):
+//    ./gradlew -Ppublishing -PjavaLinkageArtifactIds=artifactId1,artifactId2,... :checkJavaLinkage
+//
+// For example:
+//    ./gradlew -Ppublishing -PjavaLinkageArtifactIds=beam-sdks-java-core,beam-sdks-java-io-jdbc :checkJavaLinkage
+//
+// Note that this task publishes artifacts into your local Maven repository.
+if (project.hasProperty('javaLinkageArtifactIds')) {
+  if (!project.hasProperty('publishing')) {
+    throw new GradleException('You can only check linkage of Java artifacts if you specify -Ppublishing on the command line as well.')
+  }
+
+  configurations { linkageCheckerJava }
+  dependencies {
+    linkageCheckerJava "com.google.cloud.tools:dependencies:1.0.1"
+  }
+
+  // We need to evaluate all the projects first so that we can find depend on all the
+  // publishMavenJavaPublicationToMavenLocal tasks below.
+  for (p in rootProject.subprojects) {
+    if (!p.path.equals(project.path)) {
+      evaluationDependsOn(p.path)
+    }
+  }
+
+  project.task('checkJavaLinkage', type: JavaExec) {
+    dependsOn project.getTasksByName('publishMavenJavaPublicationToMavenLocal', true /* recursively */)
+    classpath = project.configurations.linkageCheckerJava
+    main = 'com.google.cloud.tools.opensource.classpath.LinkageCheckerMain'
+    args '-a', project.javaLinkageArtifactIds.split(',').collect({"${project.ext.mavenGroupId}:${it}:${project.version}"}).join(',')
+    doLast {
+      println "NOTE: This task published artifacts into your local Maven repository. You may want to remove them manually."
+    }
   }
 }

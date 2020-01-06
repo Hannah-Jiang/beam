@@ -17,7 +17,6 @@ package exec
 
 import (
 	"fmt"
-	"path"
 	"strconv"
 	"strings"
 
@@ -169,7 +168,7 @@ func (b *builder) makeWindowingStrategy(id string) (*window.WindowingStrategy, e
 	if !ok {
 		return nil, errors.Errorf("windowing strategy %v not found", id)
 	}
-	wfn, err := unmarshalWindowFn(ws.GetWindowFn().GetSpec())
+	wfn, err := unmarshalWindowFn(ws.GetWindowFn())
 	if err != nil {
 		return nil, err
 	}
@@ -346,13 +345,13 @@ func (b *builder) makeLink(from string, id linkID) (Node, error) {
 			if err := proto.Unmarshal(payload, &pardo); err != nil {
 				return nil, errors.Wrapf(err, "invalid ParDo payload for %v", transform)
 			}
-			data = string(pardo.GetDoFn().GetSpec().GetPayload())
+			data = string(pardo.GetDoFn().GetPayload())
 		case urnPerKeyCombinePre, urnPerKeyCombineMerge, urnPerKeyCombineExtract:
 			var cmb pb.CombinePayload
 			if err := proto.Unmarshal(payload, &cmb); err != nil {
 				return nil, errors.Wrapf(err, "invalid CombinePayload payload for %v", transform)
 			}
-			data = string(cmb.GetCombineFn().GetSpec().GetPayload())
+			data = string(cmb.GetCombineFn().GetPayload())
 		default:
 			// TODO(herohde) 12/4/2017: we see DoFns directly with Dataflow. Handle that
 			// case here, for now, so that the harness can use this logic.
@@ -382,9 +381,7 @@ func (b *builder) makeLink(from string, id linkID) (Node, error) {
 				if err != nil {
 					return nil, err
 				}
-				// transform.UniqueName may be per-bundle, which isn't useful for metrics.
-				// Use the short name for the DoFn instead.
-				n.PID = path.Base(n.Fn.Name())
+				n.PID = transform.GetUniqueName()
 
 				input := unmarshalKeyedValues(transform.GetInputs())
 				for i := 1; i < len(input); i++ {
@@ -414,9 +411,7 @@ func (b *builder) makeLink(from string, id linkID) (Node, error) {
 				}
 				cn.UsesKey = typex.IsKV(in[0].Type)
 
-				// transform.UniqueName may be per-bundle, which isn't useful for metrics.
-				// Use the short name for the DoFn instead.
-				cn.PID = path.Base(cn.Fn.Name())
+				cn.PID = transform.GetUniqueName()
 
 				switch urn {
 				case urnPerKeyCombinePre:
@@ -484,7 +479,7 @@ func (b *builder) makeLink(from string, id linkID) (Node, error) {
 		if err := proto.Unmarshal(payload, &wp); err != nil {
 			return nil, errors.Wrapf(err, "invalid WindowInto payload for %v", transform)
 		}
-		wfn, err := unmarshalWindowFn(wp.GetWindowFn().GetSpec())
+		wfn, err := unmarshalWindowFn(wp.GetWindowFn())
 		if err != nil {
 			return nil, err
 		}
@@ -492,7 +487,7 @@ func (b *builder) makeLink(from string, id linkID) (Node, error) {
 
 	case graphx.URNFlatten:
 		u = &Flatten{UID: b.idgen.New(), N: len(transform.Inputs), Out: out[0]}
-	
+
 		// Use the same flatten instance for all the inputs links to this transform.
 		for i := 0; i < len(transform.Inputs); i++ {
 			b.links[linkID{id.to, i}] = u

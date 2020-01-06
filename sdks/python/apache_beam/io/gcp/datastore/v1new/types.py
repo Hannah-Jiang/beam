@@ -179,7 +179,7 @@ class Key(object):
 
     return self.parent is None and other.parent is None
 
-  __hash__ = None
+  __hash__ = None  # type: ignore[assignment]
 
   def __repr__(self):
     return '<%s(%s, parent=%s, project=%s, namespace=%s)>' % (
@@ -221,6 +221,8 @@ class Entity(object):
     for name, value in client_entity.items():
       if isinstance(value, key.Key):
         value = Key.from_client_key(value)
+      if isinstance(value, entity.Entity):
+        value = Entity.from_client_entity(value)
       res.properties[name] = value
     return res
 
@@ -236,6 +238,10 @@ class Entity(object):
         if not value.project:
           value.project = self.key.project
         value = value.to_client_key()
+      if isinstance(value, Entity):
+        if not value.key.project:
+          value.key.project = self.key.project
+        value = value.to_client_entity()
       res[name] = value
     return res
 
@@ -246,7 +252,7 @@ class Entity(object):
             self.exclude_from_indexes == other.exclude_from_indexes and
             self.properties == other.properties)
 
-  __hash__ = None
+  __hash__ = None  # type: ignore[assignment]
 
   def __repr__(self):
     return "<%s(key=%s, exclude_from_indexes=%s) properties=%s>" % (

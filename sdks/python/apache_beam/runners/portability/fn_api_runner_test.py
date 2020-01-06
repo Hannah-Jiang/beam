@@ -22,6 +22,7 @@ import logging
 import os
 import random
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -30,37 +31,46 @@ import typing
 import unittest
 import uuid
 from builtins import range
+from typing import Dict
 
+# patches unittest.TestCase to be python3 compatible
+import future.tests.base  # pylint: disable=unused-import
 import hamcrest  # pylint: disable=ungrouped-imports
-import mock
 from hamcrest.core.matcher import Matcher
 from hamcrest.core.string_description import StringDescription
+from nose.plugins.attrib import attr
 from tenacity import retry
 from tenacity import stop_after_attempt
 
 import apache_beam as beam
+from apache_beam.io import iobase
 from apache_beam.io import restriction_trackers
-from apache_beam.io.concat_source_test import RangeSource
 from apache_beam.metrics import monitoring_infos
 from apache_beam.metrics.execution import MetricKey
-from apache_beam.metrics.execution import MetricsEnvironment
 from apache_beam.metrics.metricbase import MetricName
-from apache_beam.portability import python_urns
-from apache_beam.portability.api import beam_runner_api_pb2
+from apache_beam.options.pipeline_options import DebugOptions
+from apache_beam.options.pipeline_options import PipelineOptions
 from apache_beam.runners.portability import fn_api_runner
 from apache_beam.runners.worker import data_plane
+from apache_beam.runners.worker import sdk_worker
 from apache_beam.runners.worker import statesampler
 from apache_beam.testing.synthetic_pipeline import SyntheticSDFAsSource
 from apache_beam.testing.test_stream import TestStream
 from apache_beam.testing.util import assert_that
 from apache_beam.testing.util import equal_to
+from apache_beam.tools import utils
+from apache_beam.transforms import core
+from apache_beam.transforms import environments
 from apache_beam.transforms import userstate
 from apache_beam.transforms import window
+from apache_beam.utils import timestamp
 
 if statesampler.FAST_SAMPLER:
   DEFAULT_SAMPLING_PERIOD_MS = statesampler.DEFAULT_SAMPLING_PERIOD_MS
 else:
   DEFAULT_SAMPLING_PERIOD_MS = 0
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _matcher_or_equal_to(value_or_matcher):
@@ -88,7 +98,7 @@ class FnApiRunnerTest(unittest.TestCase):
   def test_assert_that(self):
     # TODO: figure out a way for fn_api_runner to parse and raise the
     # underlying exception.
-    with self.assertRaisesRegexp(Exception, 'Failed assert'):
+    with self.assertRaisesRegex(Exception, 'Failed assert'):
       with self.create_pipeline() as p:
         assert_that(p | beam.Create(['a', 'b']), equal_to(['a']))
 
@@ -103,48 +113,6 @@ class FnApiRunnerTest(unittest.TestCase):
              | beam.Map(lambda e: e * 2)
              | beam.Map(lambda e: e + 'x'))
       assert_that(res, equal_to(['aax', 'bcbcx']))
-
-  def test_pardo_metrics(self):
-
-    class MyDoFn(beam.DoFn):
-
-      def start_bundle(self):
-        self.count = beam.metrics.Metrics.counter('ns1', 'elements')
-
-      def process(self, element):
-        self.count.inc(element)
-        return [element]
-
-    class MyOtherDoFn(beam.DoFn):
-
-      def start_bundle(self):
-        self.count = beam.metrics.Metrics.counter('ns2', 'elementsplusone')
-
-      def process(self, element):
-        self.count.inc(element + 1)
-        return [element]
-
-    with self.create_pipeline() as p:
-      res = (p | beam.Create([1, 2, 3])
-             | 'mydofn' >> beam.ParDo(MyDoFn())
-             | 'myotherdofn' >> beam.ParDo(MyOtherDoFn()))
-      p.run()
-      if not MetricsEnvironment.METRICS_SUPPORTED:
-        self.skipTest('Metrics are not supported.')
-
-      counter_updates = [{'key': key, 'value': val}
-                         for container in p.runner.metrics_containers()
-                         for key, val in
-                         container.get_updates().counters.items()]
-      counter_values = [update['value'] for update in counter_updates]
-      counter_keys = [update['key'] for update in counter_updates]
-      assert_that(res, equal_to([1, 2, 3]))
-      self.assertEqual(counter_values, [6, 9])
-      self.assertEqual(counter_keys, [
-          MetricKey('mydofn',
-                    MetricName('ns1', 'elements')),
-          MetricKey('myotherdofn',
-                    MetricName('ns2', 'elementsplusone'))])
 
   def test_pardo_side_outputs(self):
     def tee(elem, *tags):
@@ -305,8 +273,10 @@ class FnApiRunnerTest(unittest.TestCase):
                 ('B', 'b', 3)]
 
     with self.create_pipeline() as p:
-      assert_that(p | beam.Create(inputs) | beam.ParDo(AddIndex()),
-                  equal_to(expected))
+      # TODO(BEAM-8893): Allow the reshuffle.
+      assert_that(
+          p | beam.Create(inputs, reshuffle=False) | beam.ParDo(AddIndex()),
+          equal_to(expected))
 
   @unittest.skip('TestStream not yet supported')
   def test_teststream_pardo_timers(self):
@@ -451,7 +421,8 @@ class FnApiRunnerTest(unittest.TestCase):
     with self.create_pipeline() as p:
       actual = (
           p
-          | beam.Create(elements)
+          # TODO(BEAM-8893): Allow the reshuffle.
+          | beam.Create(elements, reshuffle=False)
           # Send even and odd elements to different windows.
           | beam.Map(lambda e: window.TimestampedValue(e, ord(e) % 2))
           | beam.WindowInto(window.FixedWindows(1) if windowed
@@ -462,19 +433,66 @@ class FnApiRunnerTest(unittest.TestCase):
       assert_that(actual, is_buffered_correctly)
 
   def test_sdf(self):
-
     class ExpandingStringsDoFn(beam.DoFn):
       def process(
           self,
           element,
           restriction_tracker=beam.DoFn.RestrictionParam(
               ExpandStringsProvider())):
-        assert isinstance(
-            restriction_tracker,
-            restriction_trackers.OffsetRestrictionTracker), restriction_tracker
-        cur = restriction_tracker.start_position()
+        assert isinstance(restriction_tracker, iobase.RestrictionTrackerView)
+        cur = restriction_tracker.current_restriction().start
         while restriction_tracker.try_claim(cur):
           yield element[cur]
+          cur += 1
+
+    with self.create_pipeline() as p:
+      data = ['abc', 'defghijklmno', 'pqrstuv', 'wxyz']
+      actual = (
+          p
+          | beam.Create(data)
+          | beam.ParDo(ExpandingStringsDoFn()))
+      assert_that(actual, equal_to(list(''.join(data))))
+
+  def test_sdf_with_check_done_failed(self):
+    class ExpandingStringsDoFn(beam.DoFn):
+      def process(
+          self,
+          element,
+          restriction_tracker=beam.DoFn.RestrictionParam(
+              ExpandStringsProvider())):
+        assert isinstance(restriction_tracker, iobase.RestrictionTrackerView)
+        cur = restriction_tracker.current_restriction().start
+        while restriction_tracker.try_claim(cur):
+          yield element[cur]
+          cur += 1
+          return
+    with self.assertRaises(Exception):
+      with self.create_pipeline() as p:
+        data = ['abc', 'defghijklmno', 'pqrstuv', 'wxyz']
+        _ = (
+            p
+            | beam.Create(data)
+            | beam.ParDo(ExpandingStringsDoFn()))
+
+  def test_sdf_with_watermark_tracking(self):
+
+    class ExpandingStringsDoFn(beam.DoFn):
+      def process(
+          self,
+          element,
+          restriction_tracker=beam.DoFn.RestrictionParam(
+              ExpandStringsProvider()),
+          watermark_estimator=beam.DoFn.WatermarkEstimatorParam(
+              core.WatermarkEstimator())):
+        cur = restriction_tracker.current_restriction().start
+        start = cur
+        while restriction_tracker.try_claim(cur):
+          watermark_estimator.set_watermark(timestamp.Timestamp(micros=cur))
+          assert watermark_estimator.current_watermark().micros == start
+          yield element[cur]
+          if cur % 2 == 1:
+            restriction_tracker.defer_remainder(timestamp.Duration(micros=5))
+            return
           cur += 1
 
     with self.create_pipeline() as p:
@@ -495,10 +513,8 @@ class FnApiRunnerTest(unittest.TestCase):
           element,
           restriction_tracker=beam.DoFn.RestrictionParam(
               ExpandStringsProvider())):
-        assert isinstance(
-            restriction_tracker,
-            restriction_trackers.OffsetRestrictionTracker), restriction_tracker
-        cur = restriction_tracker.start_position()
+        assert isinstance(restriction_tracker, iobase.RestrictionTrackerView)
+        cur = restriction_tracker.current_restriction().start
         while restriction_tracker.try_claim(cur):
           counter.inc()
           yield element[cur]
@@ -521,34 +537,6 @@ class FnApiRunnerTest(unittest.TestCase):
       counters = res.metrics().query(beam.metrics.MetricsFilter())['counters']
       self.assertEqual(1, len(counters))
       self.assertEqual(counters[0].committed, len(''.join(data)))
-
-  def _run_sdf_wrapper_pipeline(self, source, expected_value):
-    with self.create_pipeline() as p:
-      from apache_beam.options.pipeline_options import DebugOptions
-      experiments = (p._options.view_as(DebugOptions).experiments or [])
-
-      # Setup experiment option to enable using SDFBoundedSourceWrapper
-      if not 'use_sdf_bounded_source' in experiments:
-        experiments.append('use_sdf_bounded_source')
-
-      p._options.view_as(DebugOptions).experiments = experiments
-
-      actual = (
-          p | beam.io.Read(source)
-      )
-    assert_that(actual, equal_to(expected_value))
-
-  @mock.patch('apache_beam.io.iobase._SDFBoundedSourceWrapper.expand')
-  def test_sdf_wrapper_overrides_read(self, sdf_wrapper_mock_expand):
-    def _fake_wrapper_expand(pbegin):
-      return (pbegin
-              | beam.Create(['1']))
-
-    sdf_wrapper_mock_expand.side_effect = _fake_wrapper_expand
-    self._run_sdf_wrapper_pipeline(RangeSource(0, 4), ['1'])
-
-  def test_sdf_wrap_range_source(self):
-    self._run_sdf_wrapper_pipeline(RangeSource(0, 4), [0, 1, 2, 3])
 
   def test_group_by_key(self):
     with self.create_pipeline() as p:
@@ -610,7 +598,8 @@ class FnApiRunnerTest(unittest.TestCase):
     with self.create_pipeline() as p:
       big = (p
              | beam.Create(['a', 'a', 'b'])
-             | beam.Map(lambda x: (x, x * data_plane._DEFAULT_FLUSH_THRESHOLD)))
+             | beam.Map(lambda x: (
+                 x, x * data_plane._DEFAULT_SIZE_FLUSH_THRESHOLD)))
 
       side_input_res = (
           big
@@ -675,12 +664,8 @@ class FnApiRunnerTest(unittest.TestCase):
       pcoll_b = p | 'b' >> beam.Create(['b'])
       assert_that((pcoll_a, pcoll_b) | First(), equal_to(['a']))
 
-  def test_metrics(self):
+  def test_metrics(self, check_gauge=True):
     p = self.create_pipeline()
-    if not isinstance(p.runner, fn_api_runner.FnApiRunner):
-      # This test is inherited by others that may not support the same
-      # internal way of accessing progress metrics.
-      self.skipTest('Metrics not supported.')
 
     counter = beam.metrics.Metrics.counter('ns', 'counter')
     distribution = beam.metrics.Metrics.distribution('ns', 'distribution')
@@ -691,7 +676,7 @@ class FnApiRunnerTest(unittest.TestCase):
     pcoll | 'count1' >> beam.FlatMap(lambda x: counter.inc())
     pcoll | 'count2' >> beam.FlatMap(lambda x: counter.inc(len(x)))
     pcoll | 'dist' >> beam.FlatMap(lambda x: distribution.update(len(x)))
-    pcoll | 'gauge' >> beam.FlatMap(lambda x: gauge.set(len(x)))
+    pcoll | 'gauge' >> beam.FlatMap(lambda x: gauge.set(3))
 
     res = p.run()
     res.wait_until_finish()
@@ -701,14 +686,17 @@ class FnApiRunnerTest(unittest.TestCase):
     c2, = res.metrics().query(beam.metrics.MetricsFilter().with_step('count2'))[
         'counters']
     self.assertEqual(c2.committed, 4)
+
     dist, = res.metrics().query(beam.metrics.MetricsFilter().with_step('dist'))[
         'distributions']
-    gaug, = res.metrics().query(
-        beam.metrics.MetricsFilter().with_step('gauge'))['gauges']
     self.assertEqual(
         dist.committed.data, beam.metrics.cells.DistributionData(4, 2, 1, 3))
     self.assertEqual(dist.committed.mean, 2.0)
-    self.assertEqual(gaug.committed.value, 3)
+
+    if check_gauge:
+      gaug, = res.metrics().query(
+          beam.metrics.MetricsFilter().with_step('gauge'))['gauges']
+      self.assertEqual(gaug.committed.value, 3)
 
   def test_callbacks_with_exception(self):
     elements_list = ['1', '2']
@@ -795,8 +783,10 @@ class FnApiRunnerMetricsTest(unittest.TestCase):
       self, monitoring_infos, urn, labels, value=None, ge_value=None):
     # TODO(ajamato): Consider adding a matcher framework
     found = 0
+    matches = []
     for mi in monitoring_infos:
       if has_urn_and_labels(mi, urn, labels):
+        matches.append(mi.metric.counter_data.int64_value)
         if ge_value is not None:
           if mi.metric.counter_data.int64_value >= ge_value:
             found = found + 1
@@ -808,8 +798,8 @@ class FnApiRunnerMetricsTest(unittest.TestCase):
     ge_value_str = {'ge_value' : ge_value} if ge_value else ''
     value_str = {'value' : value} if value else ''
     self.assertEqual(
-        1, found, "Found (%s) Expected only 1 monitoring_info for %s." %
-        (found, (urn, labels, value_str, ge_value_str),))
+        1, found, "Found (%s, %s) Expected only 1 monitoring_info for %s." %
+        (found, matches, (urn, labels, value_str, ge_value_str),))
 
   def assert_has_distribution(
       self, monitoring_infos, urn, labels,
@@ -866,14 +856,11 @@ class FnApiRunnerMetricsTest(unittest.TestCase):
         yield element
 
     p = self.create_pipeline()
-    if not isinstance(p.runner, fn_api_runner.FnApiRunner):
-      # This test is inherited by others that may not support the same
-      # internal way of accessing progress metrics.
-      self.skipTest('Metrics not supported.')
 
     # Produce enough elements to make sure byte sampling occurs.
     num_source_elems = 100
-    pcoll = p | beam.Create(['a%d' % i for i in range(num_source_elems)])
+    pcoll = p | beam.Create(
+        ['a%d' % i for i in range(num_source_elems)], reshuffle=False)
 
     # pylint: disable=expression-not-assigned
     pardo = ('StepThatDoesTwoOutputs' >> beam.ParDo(
@@ -902,13 +889,14 @@ class FnApiRunnerMetricsTest(unittest.TestCase):
                       and
                       monitoring_infos.PCOLLECTION_LABEL not in x.labels])
     try:
-      labels = {monitoring_infos.PCOLLECTION_LABEL : 'Impulse'}
+      labels = {
+          monitoring_infos.PCOLLECTION_LABEL : 'ref_PCollection_PCollection_1'}
       self.assert_has_counter(
           counters, monitoring_infos.ELEMENT_COUNT_URN, labels, 1)
 
-      # Create/Read, "out" output.
+      # Create output.
       labels = {monitoring_infos.PCOLLECTION_LABEL :
-                    'ref_PCollection_PCollection_1'}
+                    'ref_PCollection_PCollection_3'}
       self.assert_has_counter(
           counters,
           monitoring_infos.ELEMENT_COUNT_URN, labels, num_source_elems)
@@ -921,7 +909,7 @@ class FnApiRunnerMetricsTest(unittest.TestCase):
 
       # GenerateTwoOutputs, main output.
       labels = {monitoring_infos.PCOLLECTION_LABEL :
-                    'ref_PCollection_PCollection_2'}
+                    'ref_PCollection_PCollection_4'}
       self.assert_has_counter(
           counters,
           monitoring_infos.ELEMENT_COUNT_URN, labels, num_source_elems)
@@ -934,7 +922,7 @@ class FnApiRunnerMetricsTest(unittest.TestCase):
 
       # GenerateTwoOutputs, "SecondOutput" output.
       labels = {monitoring_infos.PCOLLECTION_LABEL :
-                    'ref_PCollection_PCollection_3'}
+                    'ref_PCollection_PCollection_5'}
       self.assert_has_counter(
           counters,
           monitoring_infos.ELEMENT_COUNT_URN, labels, 2 * num_source_elems)
@@ -947,7 +935,7 @@ class FnApiRunnerMetricsTest(unittest.TestCase):
 
       # GenerateTwoOutputs, "ThirdOutput" output.
       labels = {monitoring_infos.PCOLLECTION_LABEL :
-                    'ref_PCollection_PCollection_4'}
+                    'ref_PCollection_PCollection_6'}
       self.assert_has_counter(
           counters,
           monitoring_infos.ELEMENT_COUNT_URN, labels, num_source_elems)
@@ -962,7 +950,7 @@ class FnApiRunnerMetricsTest(unittest.TestCase):
       # outputs.
       # Flatten/Read, main output.
       labels = {monitoring_infos.PCOLLECTION_LABEL :
-                    'ref_PCollection_PCollection_5'}
+                    'ref_PCollection_PCollection_7'}
       self.assert_has_counter(
           counters,
           monitoring_infos.ELEMENT_COUNT_URN, labels, 4 * num_source_elems)
@@ -975,7 +963,7 @@ class FnApiRunnerMetricsTest(unittest.TestCase):
 
       # PassThrough, main output
       labels = {monitoring_infos.PCOLLECTION_LABEL :
-                    'ref_PCollection_PCollection_6'}
+                    'ref_PCollection_PCollection_8'}
       self.assert_has_counter(
           counters,
           monitoring_infos.ELEMENT_COUNT_URN, labels, 4 * num_source_elems)
@@ -988,7 +976,7 @@ class FnApiRunnerMetricsTest(unittest.TestCase):
 
       # PassThrough2, main output
       labels = {monitoring_infos.PCOLLECTION_LABEL :
-                    'ref_PCollection_PCollection_7'}
+                    'ref_PCollection_PCollection_9'}
       self.assert_has_counter(
           counters,
           monitoring_infos.ELEMENT_COUNT_URN, labels, num_source_elems)
@@ -1004,10 +992,6 @@ class FnApiRunnerMetricsTest(unittest.TestCase):
 
   def test_non_user_metrics(self):
     p = self.create_pipeline()
-    if not isinstance(p.runner, fn_api_runner.FnApiRunner):
-      # This test is inherited by others that may not support the same
-      # internal way of accessing progress metrics.
-      self.skipTest('Metrics not supported.')
 
     pcoll = p | beam.Create(['a', 'zzz'])
     # pylint: disable=expression-not-assigned
@@ -1037,7 +1021,8 @@ class FnApiRunnerMetricsTest(unittest.TestCase):
       namespace = split[0]
       name = ':'.join(split[1:])
       assert_counter_exists(
-          all_metrics_via_montoring_infos, namespace, name, step='Create/Read')
+          all_metrics_via_montoring_infos, namespace, name,
+          step='Create/Impulse')
       assert_counter_exists(
           all_metrics_via_montoring_infos, namespace, name, step='MyStep')
 
@@ -1048,14 +1033,10 @@ class FnApiRunnerMetricsTest(unittest.TestCase):
   @retry(reraise=True, stop=stop_after_attempt(3))
   def test_progress_metrics(self):
     p = self.create_pipeline()
-    if not isinstance(p.runner, fn_api_runner.FnApiRunner):
-      # This test is inherited by others that may not support the same
-      # internal way of accessing progress metrics.
-      self.skipTest('Progress metrics not supported.')
-      return
 
     _ = (p
-         | beam.Create([0, 0, 0, 5e-3 * DEFAULT_SAMPLING_PERIOD_MS])
+         | beam.Create(
+             [0, 0, 0, 5e-3 * DEFAULT_SAMPLING_PERIOD_MS], reshuffle=False)
          | beam.Map(time.sleep)
          | beam.Map(lambda x: ('key', x))
          | beam.GroupByKey()
@@ -1079,13 +1060,13 @@ class FnApiRunnerMetricsTest(unittest.TestCase):
       # Test the DEPRECATED legacy metrics
       pregbk_metrics, postgbk_metrics = list(
           res._metrics_by_stage.values())
-      if 'Create/Read' not in pregbk_metrics.ptransforms:
+      if 'Create/Map(decode)' not in pregbk_metrics.ptransforms:
         # The metrics above are actually unordered. Swap.
         pregbk_metrics, postgbk_metrics = postgbk_metrics, pregbk_metrics
       self.assertEqual(
           4,
-          pregbk_metrics.ptransforms['Create/Read']
-          .processed_elements.measured.output_element_counts['out'])
+          pregbk_metrics.ptransforms['Create/Map(decode)']
+          .processed_elements.measured.output_element_counts['None'])
       self.assertEqual(
           4,
           pregbk_metrics.ptransforms['Map(sleep)']
@@ -1117,20 +1098,20 @@ class FnApiRunnerMetricsTest(unittest.TestCase):
       self.assertEqual(2, len(res._monitoring_infos_by_stage))
       pregbk_mis, postgbk_mis = list(res._monitoring_infos_by_stage.values())
 
-      if not has_mi_for_ptransform(pregbk_mis, 'Create/Read'):
+      if not has_mi_for_ptransform(pregbk_mis, 'Create/Map(decode)'):
         # The monitoring infos above are actually unordered. Swap.
         pregbk_mis, postgbk_mis = postgbk_mis, pregbk_mis
 
       # pregbk monitoring infos
       labels = {monitoring_infos.PCOLLECTION_LABEL :
-                'ref_PCollection_PCollection_1'}
+                'ref_PCollection_PCollection_3'}
       self.assert_has_counter(
           pregbk_mis, monitoring_infos.ELEMENT_COUNT_URN, labels, value=4)
       self.assert_has_distribution(
           pregbk_mis, monitoring_infos.SAMPLED_BYTE_SIZE_URN, labels)
 
       labels = {monitoring_infos.PCOLLECTION_LABEL :
-                'ref_PCollection_PCollection_2'}
+                'ref_PCollection_PCollection_4'}
       self.assert_has_counter(
           pregbk_mis, monitoring_infos.ELEMENT_COUNT_URN, labels, value=4)
       self.assert_has_distribution(
@@ -1143,14 +1124,14 @@ class FnApiRunnerMetricsTest(unittest.TestCase):
 
       # postgbk monitoring infos
       labels = {monitoring_infos.PCOLLECTION_LABEL :
-                'ref_PCollection_PCollection_6'}
+                'ref_PCollection_PCollection_8'}
       self.assert_has_counter(
           postgbk_mis, monitoring_infos.ELEMENT_COUNT_URN, labels, value=1)
       self.assert_has_distribution(
           postgbk_mis, monitoring_infos.SAMPLED_BYTE_SIZE_URN, labels)
 
       labels = {monitoring_infos.PCOLLECTION_LABEL :
-                'ref_PCollection_PCollection_7'}
+                'ref_PCollection_PCollection_9'}
       self.assert_has_counter(
           postgbk_mis, monitoring_infos.ELEMENT_COUNT_URN, labels, value=5)
       self.assert_has_distribution(
@@ -1165,53 +1146,59 @@ class FnApiRunnerTestWithGrpc(FnApiRunnerTest):
   def create_pipeline(self):
     return beam.Pipeline(
         runner=fn_api_runner.FnApiRunner(
-            default_environment=beam_runner_api_pb2.Environment(
-                urn=python_urns.EMBEDDED_PYTHON_GRPC)))
+            default_environment=environments.EmbeddedPythonGrpcEnvironment()))
 
 
-class FnApiRunnerTestWithGrpcMultiThreaded(FnApiRunnerTest):
+class FnApiRunnerTestWithDisabledCaching(FnApiRunnerTest):
 
   def create_pipeline(self):
     return beam.Pipeline(
         runner=fn_api_runner.FnApiRunner(
-            default_environment=beam_runner_api_pb2.Environment(
-                urn=python_urns.EMBEDDED_PYTHON_GRPC,
-                payload=b'2')))
+            default_environment=environments.EmbeddedPythonGrpcEnvironment(
+                state_cache_size=0,
+                data_buffer_time_limit_ms=0)))
 
 
 class FnApiRunnerTestWithMultiWorkers(FnApiRunnerTest):
 
   def create_pipeline(self):
-    from apache_beam.options.pipeline_options import PipelineOptions
-    pipeline_options = PipelineOptions(['--direct_num_workers', '2'])
+    pipeline_options = PipelineOptions(direct_num_workers=2)
     p = beam.Pipeline(
         runner=fn_api_runner.FnApiRunner(),
         options=pipeline_options)
+    #TODO(BEAM-8444): Fix these tests..
+    p.options.view_as(DebugOptions).experiments.remove('beam_fn_api')
     return p
 
   def test_metrics(self):
     raise unittest.SkipTest("This test is for a single worker only.")
 
   def test_sdf_with_sdf_initiated_checkpointing(self):
+    raise unittest.SkipTest("This test is for a single worker only.")
+
+  def test_sdf_with_watermark_tracking(self):
     raise unittest.SkipTest("This test is for a single worker only.")
 
 
 class FnApiRunnerTestWithGrpcAndMultiWorkers(FnApiRunnerTest):
 
   def create_pipeline(self):
-    from apache_beam.options.pipeline_options import PipelineOptions
-    pipeline_options = PipelineOptions(['--direct_num_workers', '2'])
+    pipeline_options = PipelineOptions(direct_num_workers=2)
     p = beam.Pipeline(
         runner=fn_api_runner.FnApiRunner(
-            default_environment=beam_runner_api_pb2.Environment(
-                urn=python_urns.EMBEDDED_PYTHON_GRPC)),
+            default_environment=environments.EmbeddedPythonGrpcEnvironment()),
         options=pipeline_options)
+    #TODO(BEAM-8444): Fix these tests..
+    p.options.view_as(DebugOptions).experiments.remove('beam_fn_api')
     return p
 
   def test_metrics(self):
     raise unittest.SkipTest("This test is for a single worker only.")
 
   def test_sdf_with_sdf_initiated_checkpointing(self):
+    raise unittest.SkipTest("This test is for a single worker only.")
+
+  def test_sdf_with_watermark_tracking(self):
     raise unittest.SkipTest("This test is for a single worker only.")
 
 
@@ -1228,11 +1215,12 @@ class FnApiRunnerTestWithBundleRepeat(FnApiRunnerTest):
 class FnApiRunnerTestWithBundleRepeatAndMultiWorkers(FnApiRunnerTest):
 
   def create_pipeline(self):
-    from apache_beam.options.pipeline_options import PipelineOptions
-    pipeline_options = PipelineOptions(['--direct_num_workers', '2'])
-    return beam.Pipeline(
+    pipeline_options = PipelineOptions(direct_num_workers=2)
+    p = beam.Pipeline(
         runner=fn_api_runner.FnApiRunner(bundle_repeat=3),
         options=pipeline_options)
+    p.options.view_as(DebugOptions).experiments.remove('beam_fn_api')
+    return p
 
   def test_register_finalizations(self):
     raise unittest.SkipTest("TODO: Avoid bundle finalizations on repeat.")
@@ -1243,6 +1231,9 @@ class FnApiRunnerTestWithBundleRepeatAndMultiWorkers(FnApiRunnerTest):
   def test_sdf_with_sdf_initiated_checkpointing(self):
     raise unittest.SkipTest("This test is for a single worker only.")
 
+  def test_sdf_with_watermark_tracking(self):
+    raise unittest.SkipTest("This test is for a single worker only.")
+
 
 class FnApiRunnerSplitTest(unittest.TestCase):
 
@@ -1251,8 +1242,7 @@ class FnApiRunnerSplitTest(unittest.TestCase):
     # to the bundle process request.
     return beam.Pipeline(
         runner=fn_api_runner.FnApiRunner(
-            default_environment=beam_runner_api_pb2.Environment(
-                urn=python_urns.EMBEDDED_PYTHON_GRPC)))
+            default_environment=environments.EmbeddedPythonGrpcEnvironment()))
 
   def test_checkpoint(self):
     # This split manager will get re-invoked on each smaller split,
@@ -1385,7 +1375,7 @@ class FnApiRunnerSplitTest(unittest.TestCase):
       elements = [r.randrange(5, 10) for _ in range(5)]
       self.run_sdf_split_pipeline(split_manager, elements, element_counter)
     except Exception:
-      logging.error('test_split_crazy_sdf.seed = %s', seed)
+      _LOGGER.error('test_split_crazy_sdf.seed = %s', seed)
       raise
 
   def run_sdf_split_pipeline(
@@ -1412,7 +1402,7 @@ class FnApiRunnerSplitTest(unittest.TestCase):
           element,
           restriction_tracker=beam.DoFn.RestrictionParam(EnumerateProvider())):
         to_emit = []
-        cur = restriction_tracker.start_position()
+        cur = restriction_tracker.current_restriction().start
         while restriction_tracker.try_claim(cur):
           to_emit.append((element, cur))
           element_counter.increment()
@@ -1426,7 +1416,7 @@ class FnApiRunnerSplitTest(unittest.TestCase):
       with self.create_pipeline() as p:
         grouped = (
             p
-            | beam.Create(elements)
+            | beam.Create(elements, reshuffle=False)
             | 'SDF' >> beam.ParDo(EnumerateSdf()))
         flat = grouped | beam.FlatMap(lambda x: x)
         assert_that(flat, equal_to(expected))
@@ -1499,7 +1489,7 @@ class ElementCounter(object):
     return _unpickle_element_counter, (name,)
 
 
-_pickled_element_counters = {}
+_pickled_element_counters = {}  # type: Dict[str, ElementCounter]
 
 
 def _unpickle_element_counter(name):
@@ -1553,13 +1543,13 @@ class ExpandStringsProvider(beam.transforms.core.RestrictionProvider):
 class FnApiRunnerSplitTestWithMultiWorkers(FnApiRunnerSplitTest):
 
   def create_pipeline(self):
-    from apache_beam.options.pipeline_options import PipelineOptions
-    pipeline_options = PipelineOptions(['--direct_num_workers', '2'])
+    pipeline_options = PipelineOptions(direct_num_workers=2)
     p = beam.Pipeline(
         runner=fn_api_runner.FnApiRunner(
-            default_environment=beam_runner_api_pb2.Environment(
-                urn=python_urns.EMBEDDED_PYTHON_GRPC)),
+            default_environment=environments.EmbeddedPythonGrpcEnvironment()),
         options=pipeline_options)
+    #TODO(BEAM-8444): Fix these tests..
+    p.options.view_as(DebugOptions).experiments.remove('beam_fn_api')
     return p
 
   def test_checkpoint(self):
@@ -1568,6 +1558,77 @@ class FnApiRunnerSplitTestWithMultiWorkers(FnApiRunnerSplitTest):
   def test_split_half(self):
     raise unittest.SkipTest("This test is for a single worker only.")
 
+
+class FnApiBasedLullLoggingTest(unittest.TestCase):
+  def create_pipeline(self):
+    return beam.Pipeline(
+        runner=fn_api_runner.FnApiRunner(
+            default_environment=environments.EmbeddedPythonGrpcEnvironment(),
+            progress_request_frequency=0.5))
+
+  def test_lull_logging(self):
+
+    # TODO(BEAM-1251): Remove this test skip after dropping Py 2 support.
+    if sys.version_info < (3, 4):
+      self.skipTest('Log-based assertions are supported after Python 3.4')
+    try:
+      utils.check_compiled('apache_beam.runners.worker.opcounters')
+    except RuntimeError:
+      self.skipTest('Cython is not available')
+
+    with self.assertLogs(level='WARNING') as logs:
+      with self.create_pipeline() as p:
+        sdk_worker.DEFAULT_LOG_LULL_TIMEOUT_NS = 1000 * 1000  # Lull after 1 ms
+
+        _ = (p
+             | beam.Create([1])
+             | beam.Map(time.sleep))
+
+    self.assertRegex(
+        ''.join(logs.output),
+        '.*There has been a processing lull of over.*',
+        'Unable to find a lull logged for this job.')
+
+class StateBackedTestElementType(object):
+  live_element_count = 0
+
+  def __init__(self, num_elements, unused):
+    self.num_elements = num_elements
+    StateBackedTestElementType.live_element_count += 1
+    # Due to using state backed iterable, we expect there is a few instances
+    # alive at any given time.
+    if StateBackedTestElementType.live_element_count > 5:
+      raise RuntimeError('Too many live instances.')
+
+  def __del__(self):
+    StateBackedTestElementType.live_element_count -= 1
+
+  def __reduce__(self):
+    return (self.__class__, (self.num_elements, 'x' * self.num_elements))
+
+@attr('ValidatesRunner')
+class FnApiBasedStateBackedCoderTest(unittest.TestCase):
+
+  def create_pipeline(self):
+    return beam.Pipeline(
+        runner=fn_api_runner.FnApiRunner(use_state_iterables=True))
+
+  def test_gbk_many_values(self):
+    with self.create_pipeline() as p:
+      # The number of integers could be a knob to test against
+      # different runners' default settings on page size.
+      VALUES_PER_ELEMENT = 300
+      NUM_OF_ELEMENTS = 200
+
+      r = (p
+           | beam.Create([None])
+           | beam.FlatMap(
+               lambda x: ((1, StateBackedTestElementType(VALUES_PER_ELEMENT, _))
+                          for _ in range(NUM_OF_ELEMENTS)))
+           | beam.GroupByKey()
+           | beam.MapTuple(lambda _, vs: sum(e.num_elements for e in vs)))
+
+      assert_that(r, equal_to([VALUES_PER_ELEMENT * NUM_OF_ELEMENTS]))
 
 if __name__ == '__main__':
   logging.getLogger().setLevel(logging.INFO)

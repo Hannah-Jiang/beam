@@ -523,7 +523,7 @@ class SyntheticSDFAsSource(beam.DoFn):
       element,
       restriction_tracker=beam.DoFn.RestrictionParam(
           SyntheticSDFSourceRestrictionProvider())):
-    cur = restriction_tracker.start_position()
+    cur = restriction_tracker.current_restriction().start
     while restriction_tracker.try_claim(cur):
       r = np.random.RandomState(cur)
       time.sleep(element['sleep_per_input_record_sec'])
@@ -722,12 +722,12 @@ def parse_args(args):
   return parser.parse_known_args(args)
 
 
-def run(argv=None):
+def run(argv=None, save_main_session=True):
   """Runs the workflow."""
   known_args, pipeline_args = parse_args(argv)
 
   pipeline_options = PipelineOptions(pipeline_args)
-  pipeline_options.view_as(SetupOptions).save_main_session = True
+  pipeline_options.view_as(SetupOptions).save_main_session = save_main_session
 
   input_info = known_args.input
 

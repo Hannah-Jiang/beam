@@ -21,7 +21,10 @@ from __future__ import absolute_import
 
 import sys
 import unittest
+from typing import Type
 
+# patches unittest.TestCase to be python3 compatible
+import future.tests.base  # pylint: disable=unused-import
 from mock import MagicMock
 from mock import call
 
@@ -35,7 +38,7 @@ try:
   from google.cloud.proto.datastore.v1.query_pb2 import PropertyFilter
 except (ImportError, TypeError):
   datastore_pb2 = None
-  query_splitter = None
+  query_splitter = None  # type: ignore
 # pylint: enable=wrong-import-order, wrong-import-position
 
 
@@ -63,32 +66,32 @@ class QuerySplitterTest(unittest.TestCase):
       test_filter.property_filter.op = PropertyFilter.GREATER_THAN
     return query
 
-  split_error = ValueError
+  split_error = ValueError  # type: Type[Exception]
   query_splitter = query_splitter
 
   def test_get_splits_query_with_multiple_kinds(self):
     query = self.create_query(kinds=['a', 'b'])
-    with self.assertRaisesRegexp(self.split_error, r'one kind'):
+    with self.assertRaisesRegex(self.split_error, r'one kind'):
       self.query_splitter.get_splits(None, query, 4)
 
   def test_get_splits_query_with_order(self):
     query = self.create_query(kinds=['a'], order=True)
-    with self.assertRaisesRegexp(self.split_error, r'sort orders'):
+    with self.assertRaisesRegex(self.split_error, r'sort orders'):
       self.query_splitter.get_splits(None, query, 3)
 
   def test_get_splits_query_with_unsupported_filter(self):
     query = self.create_query(kinds=['a'], inequality_filter=True)
-    with self.assertRaisesRegexp(self.split_error, r'inequality filters'):
+    with self.assertRaisesRegex(self.split_error, r'inequality filters'):
       self.query_splitter.get_splits(None, query, 2)
 
   def test_get_splits_query_with_limit(self):
     query = self.create_query(kinds=['a'], limit=10)
-    with self.assertRaisesRegexp(self.split_error, r'limit set'):
+    with self.assertRaisesRegex(self.split_error, r'limit set'):
       self.query_splitter.get_splits(None, query, 2)
 
   def test_get_splits_query_with_offset(self):
     query = self.create_query(kinds=['a'], offset=10)
-    with self.assertRaisesRegexp(self.split_error, r'offset set'):
+    with self.assertRaisesRegex(self.split_error, r'offset set'):
       self.query_splitter.get_splits(None, query, 2)
 
   def test_create_scatter_query(self):

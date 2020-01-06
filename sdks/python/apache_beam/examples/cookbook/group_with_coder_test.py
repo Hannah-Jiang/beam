@@ -28,7 +28,7 @@ from apache_beam.testing.util import open_shards
 
 # Patch group_with_coder.PlayerCoder.decode(). To test that the PlayerCoder was
 # used, we do not strip the prepended 'x:' string when decoding a Player object.
-group_with_coder.PlayerCoder.decode = lambda self, s: group_with_coder.Player(
+group_with_coder.PlayerCoder.decode = lambda self, s: group_with_coder.Player(  # type: ignore[assignment]
     s.decode('utf-8'))
 
 
@@ -51,9 +51,10 @@ class GroupWithCoderTest(unittest.TestCase):
     # and therefore any custom coders will be used. In our case we want to make
     # sure the coder for the Player class will be used.
     temp_path = self.create_temp_file(self.SAMPLE_RECORDS)
-    group_with_coder.run([
-        '--input=%s*' % temp_path,
-        '--output=%s.result' % temp_path])
+    group_with_coder.run(
+        ['--input=%s*' % temp_path,
+         '--output=%s.result' % temp_path],
+        save_main_session=False)
     # Parse result file and compare.
     results = []
     with open_shards(temp_path + '.result-*-of-*') as result_file:
@@ -71,10 +72,11 @@ class GroupWithCoderTest(unittest.TestCase):
     # therefore any custom coders will not be used. The default coder (pickler)
     # will be used instead.
     temp_path = self.create_temp_file(self.SAMPLE_RECORDS)
-    group_with_coder.run([
-        '--no_pipeline_type_check',
-        '--input=%s*' % temp_path,
-        '--output=%s.result' % temp_path])
+    group_with_coder.run(
+        ['--no_pipeline_type_check',
+         '--input=%s*' % temp_path,
+         '--output=%s.result' % temp_path],
+        save_main_session=False)
     # Parse result file and compare.
     results = []
     with open_shards(temp_path + '.result-*-of-*') as result_file:

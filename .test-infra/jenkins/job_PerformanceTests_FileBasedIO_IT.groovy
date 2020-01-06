@@ -26,11 +26,14 @@ def jobs = [
                 githubTitle        : 'Java TextIO Performance Test',
                 githubTriggerPhrase: 'Run Java TextIO Performance Test',
                 pipelineOptions    : [
-                        bigQueryDataset: 'beam_performance',
-                        bigQueryTable  : 'textioit_results',
-                        numberOfRecords: '1000000'
+                        bigQueryDataset     : 'beam_performance',
+                        bigQueryTable       : 'textioit_results',
+                        numberOfRecords     : '25000000',
+                        expectedHash        : 'f8453256ccf861e8a312c125dfe0e436',
+                        datasetSize         : '1062290000',
+                        numWorkers          : '5',
+                        autoscalingAlgorithm: 'NONE'
                 ]
-
         ],
         [
                 name               : 'beam_PerformanceTests_Compressed_TextIOIT',
@@ -39,10 +42,14 @@ def jobs = [
                 githubTitle        : 'Java CompressedTextIO Performance Test',
                 githubTriggerPhrase: 'Run Java CompressedTextIO Performance Test',
                 pipelineOptions    : [
-                        bigQueryDataset: 'beam_performance',
-                        bigQueryTable  : 'compressed_textioit_results',
-                        numberOfRecords: '1000000',
-                        compressionType: 'GZIP'
+                        bigQueryDataset     : 'beam_performance',
+                        bigQueryTable       : 'compressed_textioit_results',
+                        numberOfRecords     : '450000000',
+                        expectedHash        : '8a3de973354abc6fba621c6797cc0f06',
+                        datasetSize         : '1097840000',
+                        compressionType     : 'GZIP',
+                        numWorkers          : '5',
+                        autoscalingAlgorithm: 'NONE'
                 ]
         ],
         [
@@ -56,8 +63,12 @@ def jobs = [
                         bigQueryTable              : 'many_files_textioit_results',
                         reportGcsPerformanceMetrics: 'true',
                         gcsPerformanceMetrics      : 'true',
-                        numberOfRecords            : '1000000',
-                        numberOfShards             : '1000'
+                        numberOfRecords            : '25000000',
+                        expectedHash               : 'f8453256ccf861e8a312c125dfe0e436',
+                        datasetSize                : '1062290000',
+                        numberOfShards             : '1000',
+                        numWorkers                 : '5',
+                        autoscalingAlgorithm       : 'NONE'
                 ]
 
         ],
@@ -68,9 +79,13 @@ def jobs = [
                 githubTitle        : 'Java AvroIO Performance Test',
                 githubTriggerPhrase: 'Run Java AvroIO Performance Test',
                 pipelineOptions    : [
-                        numberOfRecords: '1000000',
-                        bigQueryDataset: 'beam_performance',
-                        bigQueryTable  : 'avroioit_results',
+                        numberOfRecords     : '225000000',
+                        expectedHash        : '2f9f5ca33ea464b25109c0297eb6aecb',
+                        datasetSize         : '1089730000',
+                        bigQueryDataset     : 'beam_performance',
+                        bigQueryTable       : 'avroioit_results',
+                        numWorkers          : '5',
+                        autoscalingAlgorithm: 'NONE'
                 ]
         ],
         [
@@ -80,9 +95,13 @@ def jobs = [
                 githubTitle        : 'Java TFRecordIO Performance Test',
                 githubTriggerPhrase: 'Run Java TFRecordIO Performance Test',
                 pipelineOptions    : [
-                        bigQueryDataset: 'beam_performance',
-                        bigQueryTable  : 'tfrecordioit_results',
-                        numberOfRecords: '1000000'
+                        bigQueryDataset     : 'beam_performance',
+                        bigQueryTable       : 'tfrecordioit_results',
+                        numberOfRecords     : '18000000',
+                        expectedHash        : '543104423f8b6eb097acb9f111c19fe4',
+                        datasetSize         : '1019380000',
+                        numWorkers          : '5',
+                        autoscalingAlgorithm: 'NONE'
                 ]
         ],
         [
@@ -92,10 +111,14 @@ def jobs = [
                 githubTitle        : 'Java XmlIOPerformance Test',
                 githubTriggerPhrase: 'Run Java XmlIO Performance Test',
                 pipelineOptions    : [
-                        bigQueryDataset: 'beam_performance',
-                        bigQueryTable  : 'xmlioit_results',
-                        numberOfRecords: '100000000',
-                        charset        : 'UTF-8'
+                        bigQueryDataset     : 'beam_performance',
+                        bigQueryTable       : 'xmlioit_results',
+                        numberOfRecords     : '12000000',
+                        expectedHash        : 'b3b717e7df8f4878301b20f314512fb3',
+                        datasetSize         : '1076590000',
+                        charset             : 'UTF-8',
+                        numWorkers          : '5',
+                        autoscalingAlgorithm: 'NONE'
                 ]
         ],
         [
@@ -105,9 +128,13 @@ def jobs = [
                 githubTitle        : 'Java ParquetIOPerformance Test',
                 githubTriggerPhrase: 'Run Java ParquetIO Performance Test',
                 pipelineOptions    : [
-                        bigQueryDataset: 'beam_performance',
-                        bigQueryTable  : 'parquetioit_results',
-                        numberOfRecords: '100000000'
+                        bigQueryDataset     : 'beam_performance',
+                        bigQueryTable       : 'parquetioit_results',
+                        numberOfRecords     : '225000000',
+                        expectedHash        : '2f9f5ca33ea464b25109c0297eb6aecb',
+                        datasetSize         : '1087370000',
+                        numWorkers          : '5',
+                        autoscalingAlgorithm: 'NONE'
                 ]
         ],
         [
@@ -117,9 +144,13 @@ def jobs = [
                 githubTitle        : 'Java TextIO Performance Test on HDFS',
                 githubTriggerPhrase: 'Run Java TextIO Performance Test HDFS',
                 pipelineOptions    : [
-                        bigQueryDataset: 'beam_performance',
-                        bigQueryTable  : 'textioit_hdfs_results',
-                        numberOfRecords: '1000000'
+                        bigQueryDataset     : 'beam_performance',
+                        bigQueryTable       : 'textioit_hdfs_results',
+                        numberOfRecords     : '25000000',
+                        expectedHash        : 'f8453256ccf861e8a312c125dfe0e436',
+                        datasetSize         : '1062290000',
+                        numWorkers          : '5',
+                        autoscalingAlgorithm: 'NONE'
                 ]
 
         ],
@@ -130,10 +161,14 @@ def jobs = [
                 githubTitle        : 'Java CompressedTextIO Performance Test on HDFS',
                 githubTriggerPhrase: 'Run Java CompressedTextIO Performance Test HDFS',
                 pipelineOptions    : [
-                        bigQueryDataset: 'beam_performance',
-                        bigQueryTable  : 'compressed_textioit_hdfs_results',
-                        numberOfRecords: '1000000',
-                        compressionType: 'GZIP'
+                        bigQueryDataset     : 'beam_performance',
+                        bigQueryTable       : 'compressed_textioit_hdfs_results',
+                        numberOfRecords     : '450000000',
+                        expectedHash        : '8a3de973354abc6fba621c6797cc0f06',
+                        datasetSize         : '1097840000',
+                        compressionType     : 'GZIP',
+                        numWorkers          : '5',
+                        autoscalingAlgorithm: 'NONE'
                 ]
         ],
         [
@@ -147,8 +182,12 @@ def jobs = [
                         bigQueryTable              : 'many_files_textioit_hdfs_results',
                         reportGcsPerformanceMetrics: 'true',
                         gcsPerformanceMetrics      : 'true',
-                        numberOfRecords            : '1000000',
-                        numberOfShards             : '1000'
+                        numberOfRecords            : '25000000',
+                        expectedHash               : 'f8453256ccf861e8a312c125dfe0e436',
+                        datasetSize                : '1062290000',
+                        numberOfShards             : '1000',
+                        numWorkers                 : '5',
+                        autoscalingAlgorithm       : 'NONE'
                 ]
 
         ],
@@ -159,9 +198,13 @@ def jobs = [
                 githubTitle        : 'Java AvroIO Performance Test on HDFS',
                 githubTriggerPhrase: 'Run Java AvroIO Performance Test HDFS',
                 pipelineOptions    : [
-                        bigQueryDataset: 'beam_performance',
-                        bigQueryTable  : 'avroioit_hdfs_results',
-                        numberOfRecords: '1000000'
+                        bigQueryDataset     : 'beam_performance',
+                        bigQueryTable       : 'avroioit_hdfs_results',
+                        numberOfRecords     : '225000000',
+                        expectedHash        : '2f9f5ca33ea464b25109c0297eb6aecb',
+                        datasetSize         : '1089730000',
+                        numWorkers          : '5',
+                        autoscalingAlgorithm: 'NONE'
                 ]
         ],
         [
@@ -171,7 +214,11 @@ def jobs = [
                 githubTitle        : 'Java TFRecordIO Performance Test on HDFS',
                 githubTriggerPhrase: 'Run Java TFRecordIO Performance Test HDFS',
                 pipelineOptions    : [
-                        numberOfRecords: '1000000'
+                        numberOfRecords     : '18000000',
+                        expectedHash        : '543104423f8b6eb097acb9f111c19fe4',
+                        datasetSize         : '1019380000',
+                        numWorkers          : '5',
+                        autoscalingAlgorithm: 'NONE'
                 ]
         ],
         [
@@ -181,10 +228,14 @@ def jobs = [
                 githubTitle        : 'Java XmlIOPerformance Test on HDFS',
                 githubTriggerPhrase: 'Run Java XmlIO Performance Test HDFS',
                 pipelineOptions    : [
-                        bigQueryDataset: 'beam_performance',
-                        bigQueryTable  : 'xmlioit_hdfs_results',
-                        numberOfRecords: '100000',
-                        charset        : 'UTF-8'
+                        bigQueryDataset     : 'beam_performance',
+                        bigQueryTable       : 'xmlioit_hdfs_results',
+                        numberOfRecords     : '12000000',
+                        expectedHash        : 'b3b717e7df8f4878301b20f314512fb3',
+                        datasetSize         : '1076590000',
+                        charset             : 'UTF-8',
+                        numWorkers          : '5',
+                        autoscalingAlgorithm: 'NONE'
                 ]
         ],
         [
@@ -194,9 +245,13 @@ def jobs = [
                 githubTitle        : 'Java ParquetIOPerformance Test on HDFS',
                 githubTriggerPhrase: 'Run Java ParquetIO Performance Test HDFS',
                 pipelineOptions    : [
-                        bigQueryDataset: 'beam_performance',
-                        bigQueryTable  : 'parquetioit_hdfs_results',
-                        numberOfRecords: '1000000'
+                        bigQueryDataset     : 'beam_performance',
+                        bigQueryTable       : 'parquetioit_hdfs_results',
+                        numberOfRecords     : '225000000',
+                        expectedHash        : '2f9f5ca33ea464b25109c0297eb6aecb',
+                        datasetSize         : '1087370000',
+                        numWorkers          : '5',
+                        autoscalingAlgorithm: 'NONE'
                 ]
         ]
 ]

@@ -57,6 +57,24 @@ public class MultimapSideInput<K, V> implements MultimapView<K, V> {
   }
 
   @Override
+  public Iterable<K> get() {
+    StateRequest.Builder requestBuilder = StateRequest.newBuilder();
+    requestBuilder
+        .setInstructionId(instructionId)
+        .getStateKeyBuilder()
+        .getMultimapKeysSideInputBuilder()
+        .setTransformId(ptransformId)
+        .setSideInputId(sideInputId)
+        .setWindow(encodedWindow);
+
+    return new LazyCachingIteratorToIterable<>(
+        new DataStreams.DataStreamDecoder(
+            keyCoder,
+            DataStreams.inbound(
+                StateFetchingIterators.forFirstChunk(beamFnStateClient, requestBuilder.build()))));
+  }
+
+  @Override
   public Iterable<V> get(K k) {
     ByteString.Output output = ByteString.newOutput();
     try {
@@ -67,10 +85,10 @@ public class MultimapSideInput<K, V> implements MultimapView<K, V> {
     }
     StateRequest.Builder requestBuilder = StateRequest.newBuilder();
     requestBuilder
-        .setInstructionReference(instructionId)
+        .setInstructionId(instructionId)
         .getStateKeyBuilder()
         .getMultimapSideInputBuilder()
-        .setPtransformId(ptransformId)
+        .setTransformId(ptransformId)
         .setSideInputId(sideInputId)
         .setWindow(encodedWindow)
         .setKey(output.toByteString());

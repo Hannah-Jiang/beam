@@ -74,14 +74,17 @@ import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.IterableCoder;
 import org.apache.beam.sdk.extensions.gcp.options.GcpOptions;
 import org.apache.beam.sdk.io.Read;
+import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.StreamingOptions;
 import org.apache.beam.sdk.runners.AppliedPTransform;
 import org.apache.beam.sdk.runners.TransformHierarchy;
+import org.apache.beam.sdk.testing.TestStream;
 import org.apache.beam.sdk.transforms.Combine;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.DoFnSchemaInformation;
 import org.apache.beam.sdk.transforms.Flatten;
 import org.apache.beam.sdk.transforms.GroupByKey;
+import org.apache.beam.sdk.transforms.Materializations;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.View;
@@ -93,6 +96,7 @@ import org.apache.beam.sdk.transforms.reflect.DoFnSignatures;
 import org.apache.beam.sdk.transforms.windowing.DefaultTrigger;
 import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.util.AppliedCombineFn;
+import org.apache.beam.sdk.util.CoderUtils;
 import org.apache.beam.sdk.util.DoFnInfo;
 import org.apache.beam.sdk.util.WindowedValue;
 import org.apache.beam.sdk.values.KV;
@@ -101,8 +105,10 @@ import org.apache.beam.sdk.values.PCollectionView;
 import org.apache.beam.sdk.values.PInput;
 import org.apache.beam.sdk.values.POutput;
 import org.apache.beam.sdk.values.PValue;
+import org.apache.beam.sdk.values.TimestampedValue;
 import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.WindowingStrategy;
+import org.apache.beam.vendor.grpc.v1p21p0.com.google.protobuf.ByteString;
 import org.apache.beam.vendor.grpc.v1p21p0.com.google.protobuf.TextFormat;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Supplier;
@@ -121,10 +127,17 @@ public class DataflowPipelineTranslator {
   private static final Logger LOG = LoggerFactory.getLogger(DataflowPipelineTranslator.class);
   private static final ObjectMapper MAPPER = new ObjectMapper();
 
-  private static byte[] serializeWindowingStrategy(WindowingStrategy<?, ?> windowingStrategy) {
+  private static byte[] serializeWindowingStrategy(
+      WindowingStrategy<?, ?> windowingStrategy, PipelineOptions options) {
     try {
       SdkComponents sdkComponents = SdkComponents.create();
-      sdkComponents.registerEnvironment(Environments.JAVA_SDK_HARNESS_ENVIRONMENT);
+
+      String workerHarnessContainerImageURL =
+          DataflowRunner.getContainerImageForJob(options.as(DataflowPipelineOptions.class));
+      RunnerApi.Environment defaultEnvironmentForDataflow =
+          Environments.createDockerEnvironment(workerHarnessContainerImageURL);
+      sdkComponents.registerEnvironment(defaultEnvironmentForDataflow);
+
       return WindowingStrategyTranslation.toMessageProto(windowingStrategy, sdkComponents)
           .toByteArray();
     } catch (Exception e) {
@@ -164,7 +177,13 @@ public class DataflowPipelineTranslator {
 
     // Capture the sdkComponents for look up during step translations
     SdkComponents sdkComponents = SdkComponents.create();
-    sdkComponents.registerEnvironment(Environments.JAVA_SDK_HARNESS_ENVIRONMENT);
+
+    String workerHarnessContainerImageURL =
+        DataflowRunner.getContainerImageForJob(options.as(DataflowPipelineOptions.class));
+    RunnerApi.Environment defaultEnvironmentForDataflow =
+        Environments.createDockerEnvironment(workerHarnessContainerImageURL);
+    sdkComponents.registerEnvironment(defaultEnvironmentForDataflow);
+
     RunnerApi.Pipeline pipelineProto = PipelineTranslation.toProto(pipeline, sdkComponents, true);
 
     LOG.debug("Portable pipeline proto:\n{}", TextFormat.printToString(pipelineProto));
@@ -696,8 +715,11 @@ public class DataflowPipelineTranslator {
       String generatedName = String.format("%s.out%d", stepName, outputInfoList.size());
 
       addString(outputInfo, PropertyNames.USER_NAME, generatedName);
-      if (value instanceof PCollection
-          && translator.runner.doesPCollectionRequireIndexedFormat((PCollection<?>) value)) {
+      if ((value instanceof PCollection
+              && translator.runner.doesPCollectionRequireIndexedFormat((PCollection<?>) value))
+          || ((value instanceof PCollectionView)
+              && (Materializations.MULTIMAP_MATERIALIZATION_URN.equals(
+                  ((PCollectionView) value).getViewFn().getMaterialization().getUrn())))) {
         addBoolean(outputInfo, PropertyNames.USE_INDEXED_FORMAT, true);
       }
       if (valueCoder != null) {
@@ -754,7 +776,8 @@ public class DataflowPipelineTranslator {
             WindowingStrategy<?, ?> windowingStrategy = input.getWindowingStrategy();
             stepContext.addInput(
                 PropertyNames.WINDOWING_STRATEGY,
-                byteArrayToJsonString(serializeWindowingStrategy(windowingStrategy)));
+                byteArrayToJsonString(
+                    serializeWindowingStrategy(windowingStrategy, context.getPipelineOptions())));
             stepContext.addInput(
                 PropertyNames.IS_MERGING_WINDOW_FN,
                 !windowingStrategy.getWindowFn().isNonMerging());
@@ -898,7 +921,8 @@ public class DataflowPipelineTranslator {
             stepContext.addInput(PropertyNames.DISALLOW_COMBINER_LIFTING, !allowCombinerLifting);
             stepContext.addInput(
                 PropertyNames.SERIALIZED_FN,
-                byteArrayToJsonString(serializeWindowingStrategy(windowingStrategy)));
+                byteArrayToJsonString(
+                    serializeWindowingStrategy(windowingStrategy, context.getPipelineOptions())));
             stepContext.addInput(
                 PropertyNames.IS_MERGING_WINDOW_FN,
                 !windowingStrategy.getWindowFn().isNonMerging());
@@ -1039,7 +1063,8 @@ public class DataflowPipelineTranslator {
             stepContext.addOutput(PropertyNames.OUTPUT, context.getOutput(transform));
 
             WindowingStrategy<?, ?> strategy = context.getOutput(transform).getWindowingStrategy();
-            byte[] serializedBytes = serializeWindowingStrategy(strategy);
+            byte[] serializedBytes =
+                serializeWindowingStrategy(strategy, context.getPipelineOptions());
             String serializedJson = byteArrayToJsonString(serializedBytes);
             stepContext.addInput(PropertyNames.SERIALIZED_FN, serializedJson);
           }
@@ -1049,6 +1074,66 @@ public class DataflowPipelineTranslator {
     // IO Translation.
 
     registerTransformTranslator(Read.Bounded.class, new ReadTranslator());
+
+    registerTransformTranslator(
+        TestStream.class,
+        new TransformTranslator<TestStream>() {
+          @Override
+          public void translate(TestStream transform, TranslationContext context) {
+            translateTyped(transform, context);
+          }
+
+          private <T> void translateTyped(TestStream<T> transform, TranslationContext context) {
+            try {
+              StepTranslationContext stepContext = context.addStep(transform, "ParallelRead");
+              stepContext.addInput(PropertyNames.FORMAT, "test_stream");
+              RunnerApi.TestStreamPayload.Builder payloadBuilder =
+                  RunnerApi.TestStreamPayload.newBuilder();
+              for (TestStream.Event event : transform.getEvents()) {
+                if (event instanceof TestStream.ElementEvent) {
+                  RunnerApi.TestStreamPayload.Event.AddElements.Builder addElementsBuilder =
+                      RunnerApi.TestStreamPayload.Event.AddElements.newBuilder();
+                  Iterable<TimestampedValue<T>> elements =
+                      ((TestStream.ElementEvent) event).getElements();
+                  for (TimestampedValue<T> element : elements) {
+                    addElementsBuilder.addElements(
+                        RunnerApi.TestStreamPayload.TimestampedElement.newBuilder()
+                            .setEncodedElement(
+                                ByteString.copyFrom(
+                                    CoderUtils.encodeToByteArray(
+                                        transform.getValueCoder(), element.getValue())))
+                            .setTimestamp(element.getTimestamp().getMillis() * 1000));
+                  }
+                  payloadBuilder.addEventsBuilder().setElementEvent(addElementsBuilder);
+                } else if (event instanceof TestStream.WatermarkEvent) {
+                  payloadBuilder
+                      .addEventsBuilder()
+                      .setWatermarkEvent(
+                          RunnerApi.TestStreamPayload.Event.AdvanceWatermark.newBuilder()
+                              .setNewWatermark(
+                                  ((TestStream.WatermarkEvent) event).getWatermark().getMillis()
+                                      * 1000));
+                } else if (event instanceof TestStream.ProcessingTimeEvent) {
+                  payloadBuilder
+                      .addEventsBuilder()
+                      .setProcessingTimeEvent(
+                          RunnerApi.TestStreamPayload.Event.AdvanceProcessingTime.newBuilder()
+                              .setAdvanceDuration(
+                                  ((TestStream.ProcessingTimeEvent) event)
+                                          .getProcessingTimeAdvance()
+                                          .getMillis()
+                                      * 1000));
+                }
+              }
+              stepContext.addInput(
+                  PropertyNames.SERIALIZED_TEST_STREAM,
+                  byteArrayToJsonString(payloadBuilder.build().toByteArray()));
+              stepContext.addOutput(PropertyNames.OUTPUT, context.getOutput(transform));
+            } catch (Exception e) {
+              throw new RuntimeException(e);
+            }
+          }
+        });
 
     ///////////////////////////////////////////////////////////////////////////
     // Legacy Splittable DoFn translation.

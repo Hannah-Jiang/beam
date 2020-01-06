@@ -24,6 +24,8 @@ import sys
 import unittest
 from builtins import range
 
+import pytest
+
 from apache_beam.coders import proto2_coder_test_messages_pb2 as test_message
 from apache_beam.coders import coders
 from apache_beam.internal import pickler
@@ -47,6 +49,9 @@ class CustomCoder(coders.Coder):
     return int(encoded) - 1
 
 
+# These tests need to all be run in the same process due to the asserts
+# in tearDownClass.
+@pytest.mark.no_xdist
 class CodersTest(unittest.TestCase):
 
   # These class methods ensure that we test each defined coder in both
@@ -67,7 +72,7 @@ class CodersTest(unittest.TestCase):
                    if isinstance(c, type) and issubclass(c, coders.Coder) and
                    'Base' not in c.__name__)
     standard -= set([coders.Coder,
-                     coders.AvroCoder,
+                     coders.AvroGenericCoder,
                      coders.DeterministicProtoCoder,
                      coders.FastCoder,
                      coders.ProtoCoder,
@@ -155,6 +160,9 @@ class CodersTest(unittest.TestCase):
   def test_bytes_coder(self):
     self.check_coder(coders.BytesCoder(), b'a', b'\0', b'z' * 1000)
 
+  def test_bool_coder(self):
+    self.check_coder(coders.BooleanCoder(), True, False)
+
   def test_varint_coder(self):
     # Small ints.
     self.check_coder(coders.VarIntCoder(), *range(-10, 10))
@@ -241,10 +249,11 @@ class CodersTest(unittest.TestCase):
     self.check_coder(
         coders.TupleCoder(
             (coders.TupleCoder((coders.PickleCoder(), coders.VarIntCoder())),
-             coders.StrUtf8Coder())),
-        ((1, 2), 'a'),
-        ((-2, 5), u'a\u0101' * 100),
-        ((300, 1), 'abc\0' * 5))
+             coders.StrUtf8Coder(),
+             coders.BooleanCoder())),
+        ((1, 2), 'a', True),
+        ((-2, 5), u'a\u0101' * 100, False),
+        ((300, 1), 'abc\0' * 5, True))
 
   def test_tuple_sequence_coder(self):
     int_tuple_coder = coders.TupleSequenceCoder(coders.VarIntCoder())
@@ -372,6 +381,62 @@ class CodersTest(unittest.TestCase):
             coders.WindowedValueCoder(coders.StrUtf8Coder()))),
         (windowed_value.WindowedValue(1.5, 0, ()),
          windowed_value.WindowedValue("abc", 10, ('window',))))
+
+  def test_param_windowed_value_coder(self):
+    from apache_beam.transforms.window import IntervalWindow
+    from apache_beam.utils.windowed_value import PaneInfo
+    wv = windowed_value.create(
+        b'',
+        # Milliseconds to microseconds
+        1000 * 1000,
+        (IntervalWindow(11, 21),),
+        PaneInfo(True, False, 1, 2, 3))
+    windowed_value_coder = coders.WindowedValueCoder(
+        coders.BytesCoder(), coders.IntervalWindowCoder())
+    payload = windowed_value_coder.encode(wv)
+    coder = coders.ParamWindowedValueCoder(
+        payload, [coders.VarIntCoder(), coders.IntervalWindowCoder()])
+
+    # Test binary representation
+    self.assertEqual(b'\x01',
+                     coder.encode(window.GlobalWindows.windowed_value(1)))
+
+    # Test unnested
+    self.check_coder(
+        coders.ParamWindowedValueCoder(
+            payload, [coders.VarIntCoder(), coders.IntervalWindowCoder()]),
+        windowed_value.WindowedValue(
+            3,
+            1,
+            (window.IntervalWindow(11, 21),),
+            PaneInfo(True, False, 1, 2, 3)),
+        windowed_value.WindowedValue(
+            1,
+            1,
+            (window.IntervalWindow(11, 21),),
+            PaneInfo(True, False, 1, 2, 3)))
+
+    # Test nested
+    self.check_coder(
+        coders.TupleCoder((
+            coders.ParamWindowedValueCoder(
+                payload, [
+                    coders.FloatCoder(),
+                    coders.IntervalWindowCoder()]),
+            coders.ParamWindowedValueCoder(
+                payload, [
+                    coders.StrUtf8Coder(),
+                    coders.IntervalWindowCoder()]))),
+        (windowed_value.WindowedValue(
+            1.5,
+            1,
+            (window.IntervalWindow(11, 21),),
+            PaneInfo(True, False, 1, 2, 3)),
+         windowed_value.WindowedValue(
+             "abc",
+             1,
+             (window.IntervalWindow(11, 21),),
+             PaneInfo(True, False, 1, 2, 3))))
 
   def test_proto_coder(self):
     # For instructions on how these test proto message were generated,

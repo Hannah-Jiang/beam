@@ -51,6 +51,9 @@ else:
 __all__ = ['ReadFromVcf', 'Variant', 'VariantCall', 'VariantInfo',
            'MalformedVcfRecord']
 
+
+_LOGGER = logging.getLogger(__name__)
+
 # Stores data about variant INFO fields. The type of 'data' is specified in the
 # VCF headers. 'field_count' is a string that specifies the number of fields
 # that the data type contains. Its value can either be a number representing a
@@ -79,7 +82,7 @@ class Variant(object):
 
   Each object corresponds to a single record in a VCF file.
   """
-  __hash__ = None
+  __hash__ = None  # type: ignore[assignment]
 
   def __init__(self,
                reference_name=None,
@@ -199,7 +202,7 @@ class VariantCall(object):
   variant. It may include associated information such as quality and phasing.
   """
 
-  __hash__ = None
+  __hash__ = None  # type: ignore[assignment]
 
   def __init__(self, name=None, genotype=None, phaseset=None, info=None):
     """Initialize the :class:`VariantCall` object.
@@ -308,13 +311,13 @@ class _VcfSource(filebasedsource.FileBasedSource):
                                                   range_tracker)
       try:
         self._vcf_reader = vcf.Reader(fsock=self._create_generator())
-      except SyntaxError as e:
+      except SyntaxError:
         # Throw the exception inside the generator to ensure file is properly
         # closed (it's opened inside TextSource.read_records).
         self._text_lines.throw(
             ValueError('An exception was raised when reading header from VCF '
                        'file %s: %s' % (self._file_name,
-                                        traceback.format_exc(e))))
+                                        traceback.format_exc())))
 
     def _store_header_lines(self, header_lines):
       self._header_lines = header_lines
@@ -346,7 +349,7 @@ class _VcfSource(filebasedsource.FileBasedSource):
                                                self._vcf_reader.formats)
       except (LookupError, ValueError):
         if self._allow_malformed_records:
-          logging.warning(
+          _LOGGER.warning(
               'An exception was raised when reading record from VCF file '
               '%s. Invalid record was %s: %s',
               self._file_name, self._last_record, traceback.format_exc())

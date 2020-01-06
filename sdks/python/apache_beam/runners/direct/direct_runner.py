@@ -60,6 +60,9 @@ __all__ = ['BundleBasedDirectRunner',
            'SwitchingDirectRunner']
 
 
+_LOGGER = logging.getLogger(__name__)
+
+
 class SwitchingDirectRunner(PipelineRunner):
   """Executes a single pipeline on the local machine.
 
@@ -69,12 +72,56 @@ class SwitchingDirectRunner(PipelineRunner):
   implemented in the FnApiRunner.
   """
 
+  def is_fnapi_compatible(self):
+    return BundleBasedDirectRunner.is_fnapi_compatible()
+
+  def apply_TestStream(self, transform, pbegin, options):
+    """Expands the TestStream into the DirectRunner implementation.
+
+    Takes the TestStream transform and creates a _TestStream -> multiplexer ->
+    _WatermarkController.
+    """
+
+    from apache_beam.runners.direct.test_stream_impl import _TestStream
+    from apache_beam.runners.direct.test_stream_impl import _WatermarkController
+    from apache_beam import pvalue
+    assert isinstance(pbegin, pvalue.PBegin)
+
+    # If there is only one tag there is no need to add the multiplexer.
+    if len(transform.output_tags) == 1:
+      return (pbegin
+              | _TestStream(transform.output_tags, events=transform._events)
+              | _WatermarkController())
+
+    # This multiplexing the  multiple output PCollections.
+    def mux(event):
+      if event.tag:
+        yield pvalue.TaggedOutput(event.tag, event)
+      else:
+        yield event
+    mux_output = (pbegin
+                  | _TestStream(transform.output_tags, events=transform._events)
+                  | 'TestStream Multiplexer' >> beam.ParDo(mux).with_outputs())
+
+    # Apply a way to control the watermark per output. It is necessary to
+    # have an individual _WatermarkController per PCollection because the
+    # calculation of the input watermark of a transform is based on the event
+    # timestamp of the elements flowing through it. Meaning, it is impossible
+    # to control the output watermarks of the individual PCollections solely
+    # on the event timestamps.
+    outputs = {}
+    for tag in transform.output_tags:
+      label = '_WatermarkController[{}]'.format(tag)
+      outputs[tag] = (mux_output[tag] | label >> _WatermarkController())
+
+    return outputs
+
   def run_pipeline(self, pipeline, options):
 
     from apache_beam.pipeline import PipelineVisitor
     from apache_beam.runners.dataflow.native_io.iobase import NativeSource
     from apache_beam.runners.dataflow.native_io.iobase import _NativeWrite
-    from apache_beam.testing.test_stream import TestStream
+    from apache_beam.runners.direct.test_stream_impl import _TestStream
 
     class _FnApiRunnerSupportVisitor(PipelineVisitor):
       """Visitor determining if a Pipeline can be run on the FnApiRunner."""
@@ -87,7 +134,7 @@ class SwitchingDirectRunner(PipelineRunner):
       def visit_transform(self, applied_ptransform):
         transform = applied_ptransform.transform
         # The FnApiRunner does not support streaming execution.
-        if isinstance(transform, TestStream):
+        if isinstance(transform, _TestStream):
           self.supported_by_fnapi_runner = False
         # The FnApiRunner does not support reads from NativeSources.
         if (isinstance(transform, beam.io.Read) and
@@ -115,7 +162,7 @@ class SwitchingDirectRunner(PipelineRunner):
 
     # Also ensure grpc is available.
     try:
-      # pylint: disable=unused-variable
+      # pylint: disable=unused-import
       import grpc
     except ImportError:
       use_fnapi_runner = False
@@ -177,14 +224,14 @@ def _get_transform_overrides(pipeline_options):
 
   # Importing following locally to avoid a circular dependency.
   from apache_beam.pipeline import PTransformOverride
-  from apache_beam.runners.sdf_common import SplittableParDoOverride
   from apache_beam.runners.direct.helper_transforms import LiftedCombinePerKey
   from apache_beam.runners.direct.sdf_direct_runner import ProcessKeyedElementsViaKeyedWorkItemsOverride
+  from apache_beam.runners.direct.sdf_direct_runner import SplittableParDoOverride
 
   class CombinePerKeyOverride(PTransformOverride):
     def matches(self, applied_ptransform):
       if isinstance(applied_ptransform.transform, CombinePerKey):
-        return True
+        return applied_ptransform.inputs[0].windowing.is_default()
 
     def get_replacement_transform(self, transform):
       # TODO: Move imports to top. Pipeline <-> Runner dependency cause problems
@@ -244,6 +291,7 @@ class _DirectReadFromPubSub(PTransform):
 
   def _infer_output_coder(self, unused_input_type=None,
                           unused_input_coder=None):
+    # type: (...) -> typing.Optional[coders.Coder]
     return coders.BytesCoder()
 
   def get_windowing(self, inputs):
@@ -336,6 +384,10 @@ def _get_pubsub_transform_overrides(pipeline_options):
 class BundleBasedDirectRunner(PipelineRunner):
   """Executes a single pipeline on the local machine."""
 
+  @staticmethod
+  def is_fnapi_compatible():
+    return False
+
   def run_pipeline(self, pipeline, options):
     """Execute the entire pipeline and returns an DirectPipelineResult."""
 
@@ -349,7 +401,7 @@ class BundleBasedDirectRunner(PipelineRunner):
     from apache_beam.runners.direct.executor import Executor
     from apache_beam.runners.direct.transform_evaluator import \
       TransformEvaluatorRegistry
-    from apache_beam.testing.test_stream import TestStream
+    from apache_beam.runners.direct.test_stream_impl import _TestStream
 
     # Performing configured PTransform overrides.
     pipeline.replace_all(_get_transform_overrides(options))
@@ -362,17 +414,14 @@ class BundleBasedDirectRunner(PipelineRunner):
         self.uses_test_stream = False
 
       def visit_transform(self, applied_ptransform):
-        if isinstance(applied_ptransform.transform, TestStream):
+        if isinstance(applied_ptransform.transform, _TestStream):
           self.uses_test_stream = True
 
     visitor = _TestStreamUsageVisitor()
     pipeline.visit(visitor)
     clock = TestClock() if visitor.uses_test_stream else RealClock()
 
-    # TODO(BEAM-4274): Circular import runners-metrics. Requires refactoring.
-    from apache_beam.metrics.execution import MetricsEnvironment
-    MetricsEnvironment.set_metrics_supported(True)
-    logging.info('Running pipeline with DirectRunner.')
+    _LOGGER.info('Running pipeline with DirectRunner.')
     self.consumer_tracking_visitor = ConsumerTrackingPipelineVisitor()
     pipeline.visit(self.consumer_tracking_visitor)
 
@@ -414,7 +463,7 @@ class DirectPipelineResult(PipelineResult):
 
   def __del__(self):
     if self._state == PipelineState.RUNNING:
-      logging.warning(
+      _LOGGER.warning(
           'The DirectPipelineResult is being garbage-collected while the '
           'DirectRunner is still running the corresponding pipeline. This may '
           'lead to incomplete execution of the pipeline if the main thread '

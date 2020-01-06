@@ -27,8 +27,8 @@ import org.apache.beam.sdk.schemas.Schema;
 import org.apache.beam.sdk.schemas.SchemaCoder;
 import org.apache.beam.sdk.transforms.Combine.CombineFn;
 import org.apache.beam.sdk.values.Row;
-import org.apache.calcite.rel.core.AggregateCall;
-import org.apache.calcite.sql.validate.SqlUserDefinedAggFunction;
+import org.apache.beam.vendor.calcite.v1_20_0.org.apache.calcite.rel.core.AggregateCall;
+import org.apache.beam.vendor.calcite.v1_20_0.org.apache.calcite.sql.validate.SqlUserDefinedAggFunction;
 
 /** Wrapper {@link CombineFn}s for aggregation function calls. */
 public class AggregationCombineFnAdapter<T> {
@@ -99,10 +99,10 @@ public class AggregationCombineFnAdapter<T> {
     }
   }
 
-  private static class ConstantEmpty extends CombineFn<Row, Row, Row> {
-    private static final Schema EMPTY_SCHEMA = Schema.builder().build();
-    private static final Row EMPTY_ROW = Row.withSchema(EMPTY_SCHEMA).build();
+  public static final Schema EMPTY_SCHEMA = Schema.builder().build();
+  public static final Row EMPTY_ROW = Row.withSchema(EMPTY_SCHEMA).build();
 
+  private static class ConstantEmpty extends CombineFn<Row, Row, Row> {
     public static final ConstantEmpty INSTANCE = new ConstantEmpty();
 
     @Override

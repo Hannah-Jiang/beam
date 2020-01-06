@@ -28,9 +28,11 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -287,6 +289,9 @@ public class JdbcIO {
     abstract ValueProvider<String> getConnectionProperties();
 
     @Nullable
+    abstract ValueProvider<Collection<String>> getConnectionInitSqls();
+
+    @Nullable
     abstract DataSource getDataSource();
 
     abstract Builder builder();
@@ -302,6 +307,8 @@ public class JdbcIO {
       abstract Builder setPassword(ValueProvider<String> password);
 
       abstract Builder setConnectionProperties(ValueProvider<String> connectionProperties);
+
+      abstract Builder setConnectionInitSqls(ValueProvider<Collection<String>> connectionInitSqls);
 
       abstract Builder setDataSource(DataSource dataSource);
 
@@ -369,6 +376,25 @@ public class JdbcIO {
       return builder().setConnectionProperties(connectionProperties).build();
     }
 
+    /**
+     * Sets the connection init sql statements to driver.connect(...).
+     *
+     * <p>NOTE - This property is not applicable across databases. Only MySQL and MariaDB support
+     * this. A Sql exception is thrown if your database does not support it.
+     */
+    public DataSourceConfiguration withConnectionInitSqls(Collection<String> connectionInitSqls) {
+      checkArgument(connectionInitSqls != null, "connectionInitSqls can not be null");
+      return withConnectionInitSqls(ValueProvider.StaticValueProvider.of(connectionInitSqls));
+    }
+
+    /** Same as {@link #withConnectionInitSqls(Collection)} but accepting a ValueProvider. */
+    public DataSourceConfiguration withConnectionInitSqls(
+        ValueProvider<Collection<String>> connectionInitSqls) {
+      checkArgument(connectionInitSqls != null, "connectionInitSqls can not be null");
+      checkArgument(!connectionInitSqls.get().isEmpty(), "connectionInitSqls can not be empty");
+      return builder().setConnectionInitSqls(connectionInitSqls).build();
+    }
+
     void populateDisplayData(DisplayData.Builder builder) {
       if (getDataSource() != null) {
         builder.addIfNotNull(DisplayData.item("dataSource", getDataSource().getClass().getName()));
@@ -397,6 +423,12 @@ public class JdbcIO {
         if (getConnectionProperties() != null && getConnectionProperties().get() != null) {
           basicDataSource.setConnectionProperties(getConnectionProperties().get());
         }
+        if (getConnectionInitSqls() != null
+            && getConnectionInitSqls().get() != null
+            && !getConnectionInitSqls().get().isEmpty()) {
+          basicDataSource.setConnectionInitSqls(getConnectionInitSqls().get());
+        }
+
         return basicDataSource;
       }
       return getDataSource();
@@ -445,6 +477,10 @@ public class JdbcIO {
       abstract Builder setOutputParallelization(boolean outputParallelization);
 
       abstract ReadRows build();
+    }
+
+    public ReadRows withDataSourceConfiguration(DataSourceConfiguration config) {
+      return withDataSourceProviderFn(new DataSourceProviderFromDataSourceConfiguration(config));
     }
 
     public ReadRows withDataSourceProviderFn(
@@ -792,7 +828,10 @@ public class JdbcIO {
         SchemaRegistry registry = input.getPipeline().getSchemaRegistry();
         Schema schema = registry.getSchema(typeDesc);
         output.setSchema(
-            schema, registry.getToRowFunction(typeDesc), registry.getFromRowFunction(typeDesc));
+            schema,
+            typeDesc,
+            registry.getToRowFunction(typeDesc),
+            registry.getFromRowFunction(typeDesc));
       } catch (NoSuchSchemaException e) {
         // ignore
       }
@@ -900,10 +939,7 @@ public class JdbcIO {
 
     /** See {@link WriteVoid#withDataSourceConfiguration(DataSourceConfiguration)}. */
     public Write<T> withDataSourceConfiguration(DataSourceConfiguration config) {
-      return new Write(
-          inner
-              .withDataSourceConfiguration(config)
-              .withDataSourceProviderFn(new DataSourceProviderFromDataSourceConfiguration(config)));
+      return new Write(inner.withDataSourceConfiguration(config));
     }
 
     /** See {@link WriteVoid#withDataSourceProviderFn(SerializableFunction)}. */
@@ -1334,79 +1370,79 @@ public class JdbcIO {
     }
   }
 
-  /** Wraps a {@link DataSourceConfiguration} to provide a {@link PoolingDataSource}. */
+  /**
+   * Wraps a {@link DataSourceConfiguration} to provide a {@link PoolingDataSource}.
+   *
+   * <p>At most a single {@link DataSource} instance will be constructed during pipeline execution
+   * for each unique {@link DataSourceConfiguration} within the pipeline.
+   */
   public static class PoolableDataSourceProvider
       implements SerializableFunction<Void, DataSource>, HasDisplayData {
-    private static PoolableDataSourceProvider instance;
-    private static transient DataSource source;
-    private static SerializableFunction<Void, DataSource> dataSourceProviderFn;
+    private static final ConcurrentHashMap<DataSourceConfiguration, DataSource> instances =
+        new ConcurrentHashMap<>();
+    private final DataSourceProviderFromDataSourceConfiguration config;
 
     private PoolableDataSourceProvider(DataSourceConfiguration config) {
-      dataSourceProviderFn = DataSourceProviderFromDataSourceConfiguration.of(config);
+      this.config = new DataSourceProviderFromDataSourceConfiguration(config);
     }
 
-    public static synchronized SerializableFunction<Void, DataSource> of(
-        DataSourceConfiguration config) {
-      if (instance == null) {
-        instance = new PoolableDataSourceProvider(config);
-      }
-      return instance;
+    public static SerializableFunction<Void, DataSource> of(DataSourceConfiguration config) {
+      return new PoolableDataSourceProvider(config);
     }
 
     @Override
     public DataSource apply(Void input) {
-      return buildDataSource(input);
-    }
-
-    static synchronized DataSource buildDataSource(Void input) {
-      if (source == null) {
-        DataSource basicSource = dataSourceProviderFn.apply(input);
-        DataSourceConnectionFactory connectionFactory =
-            new DataSourceConnectionFactory(basicSource);
-        PoolableConnectionFactory poolableConnectionFactory =
-            new PoolableConnectionFactory(connectionFactory, null);
-        GenericObjectPoolConfig poolConfig = new GenericObjectPoolConfig();
-        poolConfig.setMaxTotal(1);
-        poolConfig.setMinIdle(0);
-        poolConfig.setMinEvictableIdleTimeMillis(10000);
-        poolConfig.setSoftMinEvictableIdleTimeMillis(30000);
-        GenericObjectPool connectionPool =
-            new GenericObjectPool(poolableConnectionFactory, poolConfig);
-        poolableConnectionFactory.setPool(connectionPool);
-        poolableConnectionFactory.setDefaultAutoCommit(false);
-        poolableConnectionFactory.setDefaultReadOnly(false);
-        source = new PoolingDataSource(connectionPool);
-      }
-      return source;
+      return instances.computeIfAbsent(
+          config.config,
+          ignored -> {
+            DataSource basicSource = config.apply(input);
+            DataSourceConnectionFactory connectionFactory =
+                new DataSourceConnectionFactory(basicSource);
+            PoolableConnectionFactory poolableConnectionFactory =
+                new PoolableConnectionFactory(connectionFactory, null);
+            GenericObjectPoolConfig poolConfig = new GenericObjectPoolConfig();
+            poolConfig.setMaxTotal(1);
+            poolConfig.setMinIdle(0);
+            poolConfig.setMinEvictableIdleTimeMillis(10000);
+            poolConfig.setSoftMinEvictableIdleTimeMillis(30000);
+            GenericObjectPool connectionPool =
+                new GenericObjectPool(poolableConnectionFactory, poolConfig);
+            poolableConnectionFactory.setPool(connectionPool);
+            poolableConnectionFactory.setDefaultAutoCommit(false);
+            poolableConnectionFactory.setDefaultReadOnly(false);
+            return new PoolingDataSource(connectionPool);
+          });
     }
 
     @Override
     public void populateDisplayData(DisplayData.Builder builder) {
-      if (dataSourceProviderFn instanceof HasDisplayData) {
-        ((HasDisplayData) dataSourceProviderFn).populateDisplayData(builder);
-      }
+      config.populateDisplayData(builder);
     }
   }
 
-  private static class DataSourceProviderFromDataSourceConfiguration
+  /**
+   * Wraps a {@link DataSourceConfiguration} to provide a {@link DataSource}.
+   *
+   * <p>At most a single {@link DataSource} instance will be constructed during pipeline execution
+   * for each unique {@link DataSourceConfiguration} within the pipeline.
+   */
+  public static class DataSourceProviderFromDataSourceConfiguration
       implements SerializableFunction<Void, DataSource>, HasDisplayData {
+    private static final ConcurrentHashMap<DataSourceConfiguration, DataSource> instances =
+        new ConcurrentHashMap<>();
     private final DataSourceConfiguration config;
-    private static DataSourceProviderFromDataSourceConfiguration instance;
 
     private DataSourceProviderFromDataSourceConfiguration(DataSourceConfiguration config) {
       this.config = config;
     }
 
     public static SerializableFunction<Void, DataSource> of(DataSourceConfiguration config) {
-      if (instance == null) {
-        instance = new DataSourceProviderFromDataSourceConfiguration(config);
-      }
-      return instance;
+      return new DataSourceProviderFromDataSourceConfiguration(config);
     }
 
     @Override
     public DataSource apply(Void input) {
-      return config.buildDatasource();
+      return instances.computeIfAbsent(config, (config) -> config.buildDatasource());
     }
 
     @Override

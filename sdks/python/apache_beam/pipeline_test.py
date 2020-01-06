@@ -20,14 +20,13 @@
 from __future__ import absolute_import
 
 import copy
-import logging
 import platform
 import unittest
 from builtins import object
 from builtins import range
-from collections import defaultdict
 
 import mock
+from nose.plugins.attrib import attr
 
 import apache_beam as beam
 from apache_beam import typehints
@@ -39,10 +38,8 @@ from apache_beam.pipeline import PipelineOptions
 from apache_beam.pipeline import PipelineVisitor
 from apache_beam.pipeline import PTransformOverride
 from apache_beam.pvalue import AsSingleton
+from apache_beam.pvalue import TaggedOutput
 from apache_beam.runners.dataflow.native_io.iobase import NativeSource
-from apache_beam.runners.direct.evaluation_context import _ExecutionContext
-from apache_beam.runners.direct.transform_evaluator import _GroupByKeyOnlyEvaluator
-from apache_beam.runners.direct.transform_evaluator import _TransformEvaluator
 from apache_beam.testing.test_pipeline import TestPipeline
 from apache_beam.testing.util import assert_that
 from apache_beam.testing.util import equal_to
@@ -57,6 +54,7 @@ from apache_beam.transforms import WindowInto
 from apache_beam.transforms.userstate import BagStateSpec
 from apache_beam.transforms.window import SlidingWindows
 from apache_beam.transforms.window import TimestampedValue
+from apache_beam.utils import windowed_value
 from apache_beam.utils.timestamp import MIN_TIMESTAMP
 
 # TODO(BEAM-1555): Test is failing on the service, with FakeSource.
@@ -256,7 +254,7 @@ class PipelineTest(unittest.TestCase):
 
   def test_visit_entire_graph(self):
     pipeline = Pipeline()
-    pcoll1 = pipeline | 'pcoll' >> Create([1, 2, 3])
+    pcoll1 = pipeline | 'pcoll' >> beam.Impulse()
     pcoll2 = pcoll1 | 'do1' >> FlatMap(lambda x: [x + 1])
     pcoll3 = pcoll2 | 'do2' >> FlatMap(lambda x: [x + 1])
     pcoll4 = pcoll2 | 'do3' >> FlatMap(lambda x: [x + 1])
@@ -269,9 +267,9 @@ class PipelineTest(unittest.TestCase):
                      set(visitor.visited))
     self.assertEqual(set(visitor.enter_composite),
                      set(visitor.leave_composite))
-    self.assertEqual(3, len(visitor.enter_composite))
-    self.assertEqual(visitor.enter_composite[2].transform, transform)
-    self.assertEqual(visitor.leave_composite[1].transform, transform)
+    self.assertEqual(2, len(visitor.enter_composite))
+    self.assertEqual(visitor.enter_composite[1].transform, transform)
+    self.assertEqual(visitor.leave_composite[0].transform, transform)
 
   def test_apply_custom_transform(self):
     pipeline = TestPipeline()
@@ -290,9 +288,8 @@ class PipelineTest(unittest.TestCase):
       pipeline.apply(transform, pcoll2)
     self.assertEqual(
         cm.exception.args[0],
-        'Transform "CustomTransform" does not have a stable unique label. '
-        'This will prevent updating of pipelines. '
-        'To apply a transform with a specified label write '
+        'A transform with label "CustomTransform" already exists in the '
+        'pipeline. To apply a transform with a specified label write '
         'pvalue | "label" >> transform')
 
   def test_reuse_cloned_custom_transform_instance(self):
@@ -439,6 +436,87 @@ class PipelineTest(unittest.TestCase):
       p.replace_all([override])
       self.assertEqual(pcoll.producer.inputs[0].element_type, expected_type)
 
+  def test_ptransform_override_multiple_outputs(self):
+    class MultiOutputComposite(PTransform):
+      def __init__(self):
+        self.output_tags = set()
+
+      def expand(self, pcoll):
+        def mux_input(x):
+          x = x * 2
+          if isinstance(x, int):
+            yield TaggedOutput('numbers', x)
+          else:
+            yield TaggedOutput('letters', x)
+
+        multi = pcoll | 'MyReplacement' >> beam.ParDo(mux_input).with_outputs()
+        letters = multi.letters | 'LettersComposite' >> beam.Map(lambda x: x*3)
+        numbers = multi.numbers | 'NumbersComposite' >> beam.Map(lambda x: x*5)
+
+        return {
+            'letters': letters,
+            'numbers': numbers,
+        }
+
+    class MultiOutputOverride(PTransformOverride):
+      def matches(self, applied_ptransform):
+        return applied_ptransform.full_label == 'MyMultiOutput'
+
+      def get_replacement_transform(self, ptransform):
+        return MultiOutputComposite()
+
+    def mux_input(x):
+      if isinstance(x, int):
+        yield TaggedOutput('numbers', x)
+      else:
+        yield TaggedOutput('letters', x)
+
+    p = TestPipeline()
+    multi = (p
+             | beam.Create([1, 2, 3, 'a', 'b', 'c'])
+             | 'MyMultiOutput' >> beam.ParDo(mux_input).with_outputs())
+    letters = multi.letters | 'MyLetters' >> beam.Map(lambda x: x)
+    numbers = multi.numbers | 'MyNumbers' >> beam.Map(lambda x: x)
+
+    # Assert that the PCollection replacement worked correctly and that elements
+    # are flowing through. The replacement transform first multiples by 2 then
+    # the leaf nodes inside the composite multiply by an additional 3 and 5. Use
+    # prime numbers to ensure that each transform is getting executed once.
+    assert_that(letters,
+                equal_to(['a'*2*3, 'b'*2*3, 'c'*2*3]),
+                label='assert letters')
+    assert_that(numbers,
+                equal_to([1*2*5, 2*2*5, 3*2*5]),
+                label='assert numbers')
+
+    # Do the replacement and run the element assertions.
+    p.replace_all([MultiOutputOverride()])
+    p.run()
+
+    # The following checks the graph to make sure the replacement occurred.
+    visitor = PipelineTest.Visitor(visited=[])
+    p.visit(visitor)
+    pcollections = visitor.visited
+    composites = visitor.enter_composite
+
+    # Assert the replacement is in the composite list and retrieve the
+    # AppliedPTransform.
+    self.assertIn(MultiOutputComposite,
+                  [t.transform.__class__ for t in composites])
+    multi_output_composite = list(
+        filter(lambda t: t.transform.__class__ == MultiOutputComposite,
+               composites))[0]
+
+    # Assert that all of the replacement PCollections are in the graph.
+    for output in multi_output_composite.outputs.values():
+      self.assertIn(output, pcollections)
+
+    # Assert that all of the "old"/replaced PCollections are not in the graph.
+    self.assertNotIn(multi[None], visitor.visited)
+    self.assertNotIn(multi.letters, visitor.visited)
+    self.assertNotIn(multi.numbers, visitor.visited)
+
+
   def test_kv_ptransform_honor_type_hints(self):
 
     # The return type of this DoFn cannot be inferred by the default
@@ -564,6 +642,25 @@ class DoFnTest(unittest.TestCase):
     assert_that(result, equal_to(['zyx-%s-xyz' % x for x in words_list]))
     pipeline.run()
 
+  @attr('ValidatesRunner')
+  def test_element_param(self):
+    pipeline = TestPipeline()
+    input = [1, 2]
+    pcoll = (pipeline
+             | 'Create' >> Create(input)
+             | 'Ele param' >> Map(lambda element=DoFn.ElementParam: element))
+    assert_that(pcoll, equal_to(input))
+    pipeline.run()
+
+  @attr('ValidatesRunner')
+  def test_key_param(self):
+    pipeline = TestPipeline()
+    pcoll = (pipeline
+             | 'Create' >> Create([('a', 1), ('b', 2)])
+             | 'Key param' >> Map(lambda _, key=DoFn.KeyParam: key))
+    assert_that(pcoll, equal_to(['a', 'b']))
+    pipeline.run()
+
   def test_window_param(self):
     class TestDoFn(DoFn):
       def process(self, element, window=DoFn.WindowParam):
@@ -601,6 +698,45 @@ class DoFnTest(unittest.TestCase):
       assert_that(
           p | Create([1, 2]) | beam.Map(lambda _, t=DoFn.TimestampParam: t),
           equal_to([MIN_TIMESTAMP, MIN_TIMESTAMP]))
+
+  def test_pane_info_param(self):
+    with TestPipeline() as p:
+      pc = p | Create([(None, None)])
+      assert_that(
+          pc | beam.Map(lambda _, p=DoFn.PaneInfoParam: p),
+          equal_to([windowed_value.PANE_INFO_UNKNOWN]),
+          label='CheckUngrouped')
+      assert_that(
+          pc | beam.GroupByKey() | beam.Map(lambda _, p=DoFn.PaneInfoParam: p),
+          equal_to([windowed_value.PaneInfo(
+              is_first=True,
+              is_last=True,
+              timing=windowed_value.PaneInfoTiming.ON_TIME,
+              index=0,
+              nonspeculative_index=0)]),
+          label='CheckGrouped')
+
+  def test_incomparable_default(self):
+
+    class IncomparableType(object):
+
+      def __eq__(self, other):
+        raise RuntimeError()
+
+      def __ne__(self, other):
+        raise RuntimeError()
+
+      def __hash__(self):
+        raise RuntimeError()
+
+    # Ensure that we don't use default values in a context where they must be
+    # comparable (see BEAM-8301).
+    pipeline = TestPipeline()
+    pcoll = (pipeline
+             | beam.Create([None])
+             | Map(lambda e, x=IncomparableType(): (e, type(x).__name__)))
+    assert_that(pcoll, equal_to([(None, 'IncomparableType')]))
+    pipeline.run()
 
 
 class Bacon(PipelineOptions):
@@ -692,85 +828,5 @@ class RunnerApiTest(unittest.TestCase):
                      p.transforms_stack[0])
 
 
-class DirectRunnerRetryTests(unittest.TestCase):
-
-  def test_retry_fork_graph(self):
-    # TODO(BEAM-3642): The FnApiRunner currently does not currently support
-    # retries.
-    p = beam.Pipeline(runner='BundleBasedDirectRunner')
-
-    # TODO(mariagh): Remove the use of globals from the test.
-    global count_b, count_c # pylint: disable=global-variable-undefined
-    count_b, count_c = 0, 0
-
-    def f_b(x):
-      global count_b  # pylint: disable=global-variable-undefined
-      count_b += 1
-      raise Exception('exception in f_b')
-
-    def f_c(x):
-      global count_c  # pylint: disable=global-variable-undefined
-      count_c += 1
-      raise Exception('exception in f_c')
-
-    names = p | 'CreateNodeA' >> beam.Create(['Ann', 'Joe'])
-
-    fork_b = names | 'SendToB' >> beam.Map(f_b) # pylint: disable=unused-variable
-    fork_c = names | 'SendToC' >> beam.Map(f_c) # pylint: disable=unused-variable
-
-    with self.assertRaises(Exception):
-      p.run().wait_until_finish()
-    assert count_b == count_c == 4
-
-  def test_no_partial_writeouts(self):
-
-    class TestTransformEvaluator(_TransformEvaluator):
-
-      def __init__(self):
-        self._execution_context = _ExecutionContext(None, {})
-
-      def start_bundle(self):
-        self.step_context = self._execution_context.get_step_context()
-
-      def process_element(self, element):
-        k, v = element
-        state = self.step_context.get_keyed_state(k)
-        state.add_state(None, _GroupByKeyOnlyEvaluator.ELEMENTS_TAG, v)
-
-    # Create instance and add key/value, key/value2
-    evaluator = TestTransformEvaluator()
-    evaluator.start_bundle()
-    self.assertIsNone(evaluator.step_context.existing_keyed_state.get('key'))
-    self.assertIsNone(evaluator.step_context.partial_keyed_state.get('key'))
-
-    evaluator.process_element(['key', 'value'])
-    self.assertEqual(
-        evaluator.step_context.existing_keyed_state['key'].state,
-        defaultdict(lambda: defaultdict(list)))
-    self.assertEqual(
-        evaluator.step_context.partial_keyed_state['key'].state,
-        {None: {'elements':['value']}})
-
-    evaluator.process_element(['key', 'value2'])
-    self.assertEqual(
-        evaluator.step_context.existing_keyed_state['key'].state,
-        defaultdict(lambda: defaultdict(list)))
-    self.assertEqual(
-        evaluator.step_context.partial_keyed_state['key'].state,
-        {None: {'elements':['value', 'value2']}})
-
-    # Simulate an exception (redo key/value)
-    evaluator._execution_context.reset()
-    evaluator.start_bundle()
-    evaluator.process_element(['key', 'value'])
-    self.assertEqual(
-        evaluator.step_context.existing_keyed_state['key'].state,
-        defaultdict(lambda: defaultdict(list)))
-    self.assertEqual(
-        evaluator.step_context.partial_keyed_state['key'].state,
-        {None: {'elements':['value']}})
-
-
 if __name__ == '__main__':
-  logging.getLogger().setLevel(logging.DEBUG)
   unittest.main()

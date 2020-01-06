@@ -144,15 +144,15 @@ class ParDoBoundMultiTranslator<InT, OutT>
             transform.getFn(),
             keyCoder,
             (Coder<InT>) input.getCoder(),
+            null,
             outputCoders,
             transform.getSideInputs().values(),
             transform.getAdditionalOutputTags().getAll(),
             input.getWindowingStrategy(),
             idToPValueMap,
             new DoFnOp.MultiOutputManagerFactory(tagToIndexMap),
-            node.getFullName(),
-            // TODO: infer a fixed id from the name
-            String.valueOf(ctx.getCurrentTopologicalId()),
+            ctx.getTransformFullName(),
+            ctx.getTransformId(),
             input.isBounded(),
             false,
             null,
@@ -238,8 +238,7 @@ class ParDoBoundMultiTranslator<InT, OutT>
             });
 
     WindowedValue.WindowedValueCoder<InT> windowedInputCoder =
-        SamzaPipelineTranslatorUtils.instantiateCoder(inputId, pipeline.getComponents());
-    final String nodeFullname = transform.getTransform().getUniqueName();
+        ctx.instantiateCoder(inputId, pipeline.getComponents());
 
     final DoFnSchemaInformation doFnSchemaInformation;
     doFnSchemaInformation = ParDoTranslation.getSchemaInformation(transform.getTransform());
@@ -256,15 +255,15 @@ class ParDoBoundMultiTranslator<InT, OutT>
             new NoOpDoFn<>(),
             null, // key coder not in use
             windowedInputCoder.getValueCoder(), // input coder not in use
+            windowedInputCoder,
             Collections.emptyMap(), // output coders not in use
             Collections.emptyList(), // sideInputs not in use until side input support
             new ArrayList<>(idToTupleTagMap.values()), // used by java runner only
             SamzaPipelineTranslatorUtils.getPortableWindowStrategy(transform, pipeline),
             Collections.emptyMap(), // idToViewMap not in use until side input support
             new DoFnOp.MultiOutputManagerFactory(tagToIndexMap),
-            nodeFullname,
-            // TODO: infer a fixed id from the name
-            String.valueOf(ctx.getCurrentTopologicalId()),
+            ctx.getTransformFullName(),
+            ctx.getTransformId(),
             isBounded,
             true,
             stagePayload,
@@ -311,7 +310,7 @@ class ParDoBoundMultiTranslator<InT, OutT>
         config.put(
             "stores." + storeId + ".factory",
             "org.apache.samza.storage.kv.RocksDbKeyValueStorageEngineFactory");
-        config.put("stores." + storeId + ".key.serde", "byteSerde");
+        config.put("stores." + storeId + ".key.serde", "byteArraySerde");
         config.put("stores." + storeId + ".msg.serde", "byteSerde");
 
         if (options.getStateDurable()) {
