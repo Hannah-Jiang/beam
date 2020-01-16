@@ -29,7 +29,7 @@ import org.apache.beam.runners.dataflow.worker.windmill.Windmill.Timer;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.state.TimeDomain;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
-import org.apache.beam.vendor.grpc.v1p21p0.com.google.protobuf.ByteString;
+import org.apache.beam.vendor.grpc.v1p26p0.com.google.protobuf.ByteString;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.HashBasedTable;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.Table;
@@ -184,7 +184,7 @@ class WindmillTimerInternals implements TimerInternals {
               .setStateFamily(stateFamily)
               .setReset(true)
               .addTimestamps(
-                  WindmillTimeUtils.harnessToWindmillTimestamp(timerData.getTimestamp()));
+                  WindmillTimeUtils.harnessToWindmillTimestamp(timerData.getOutputTimestamp()));
         }
       } else {
         // Deleting a timer. If it is a user timer, clear the hold

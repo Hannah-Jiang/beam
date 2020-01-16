@@ -23,28 +23,63 @@ import org.gradle.api.Project
 /**
  * Utilities for working with our vendored version of gRPC.
  */
-class GrpcVendoring {
+class GrpcVendoring_1_26_0 {
+
+  static def guava_version = "26.0-jre"
+  static def protobuf_version = "3.11.0"
+  static def grpc_version = "1.26.0"
+  static def gson_version = "2.8.6"
+  static def netty_version = "4.1.42.Final"
+  static def google_auth_version = "0.18.0"
+  static def proto_google_common_protos_version = "1.12.0"
+  static def opencensus_version = "0.24.0"
+  static def perfmark_version = "0.19.0"
+  static def lzma_java_version = "1.3"
+  static def protobuf_javanano_version = "3.0.0-alpha-5"
+  static def jzlib_version = "1.1.3"
+  static def compress_lzf_version = "1.0.3"
+  static def lz4_version = "1.3.0"
+  static def bouncycastle_version = "1.54"
+  static def conscrypt_version = "1.3.0"
+  static def alpn_api_version = "1.1.2.v20150522"
+  static def npn_api_version = "1.1.1.v20141010"
+  static def jboss_marshalling_version = "1.4.11.Final"
+  static def jboss_modules_version = "1.1.0.Beta1"
+
   /** Returns the list of compile time dependencies. */
   static List<String> dependencies() {
     return [
-      'com.google.guava:guava:26.0-jre',
-      'com.google.protobuf:protobuf-java:3.7.1',
-      'com.google.protobuf:protobuf-java-util:3.7.1',
-      'com.google.code.gson:gson:2.7',
-      'io.grpc:grpc-auth:1.21.0',
-      'io.grpc:grpc-core:1.21.0',
-      'io.grpc:grpc-context:1.21.0',
-      'io.grpc:grpc-netty:1.21.0',
-      'io.grpc:grpc-protobuf:1.21.0',
-      'io.grpc:grpc-stub:1.21.0',
-      'io.netty:netty-transport-native-epoll:4.1.34.Final',
+      "com.google.guava:guava:$guava_version",
+      "com.google.protobuf:protobuf-java:$protobuf_version",
+      "com.google.protobuf:protobuf-java-util:$protobuf_version",
+      "com.google.code.gson:gson:$gson_version",
+      "io.grpc:grpc-auth:$grpc_version",
+      "io.grpc:grpc-core:$grpc_version",
+      "io.grpc:grpc-context:$grpc_version",
+      "io.grpc:grpc-netty:$grpc_version",
+      "io.grpc:grpc-protobuf:$grpc_version",
+      "io.grpc:grpc-stub:$grpc_version",
+      "io.netty:netty-transport-native-epoll:$netty_version",
       // tcnative version from https://github.com/grpc/grpc-java/blob/master/SECURITY.md#netty
-      'io.netty:netty-tcnative-boringssl-static:2.0.22.Final',
-      'com.google.auth:google-auth-library-credentials:0.13.0',
-      'io.grpc:grpc-testing:1.21.0',
-      'com.google.api.grpc:proto-google-common-protos:1.12.0',
-      'io.opencensus:opencensus-api:0.21.0',
-      'io.opencensus:opencensus-contrib-grpc-metrics:0.21.0',
+      "io.netty:netty-tcnative-boringssl-static:2.0.26.Final",
+      "com.google.auth:google-auth-library-credentials:$google_auth_version",
+      "io.grpc:grpc-testing:$grpc_version",
+      "com.google.api.grpc:proto-google-common-protos:$proto_google_common_protos_version",
+      "io.opencensus:opencensus-api:$opencensus_version",
+      "io.opencensus:opencensus-contrib-grpc-metrics:$opencensus_version",
+      "io.perfmark:perfmark-api:$perfmark_version",
+      "com.github.jponge:lzma-java:$lzma_java_version",
+      "com.google.protobuf.nano:protobuf-javanano:$protobuf_javanano_version",
+      "com.jcraft:jzlib:$jzlib_version",
+      "com.ning:compress-lzf:$compress_lzf_version",
+      "net.jpountz.lz4:lz4:$lz4_version",
+      "org.bouncycastle:bcpkix-jdk15on:$bouncycastle_version",
+      "org.bouncycastle:bcprov-jdk15on:$bouncycastle_version",
+      "org.conscrypt:conscrypt-openjdk-uber:$conscrypt_version",
+      "org.eclipse.jetty.alpn:alpn-api:$alpn_api_version",
+      "org.eclipse.jetty.npn:npn-api:$npn_api_version",
+      "org.jboss.marshalling:jboss-marshalling:$jboss_marshalling_version",
+      "org.jboss.modules:jboss-modules:$jboss_modules_version"
     ]
   }
 
@@ -54,7 +89,19 @@ class GrpcVendoring {
    */
   static List<String> runtimeDependencies() {
     return [
-      'com.google.errorprone:error_prone_annotations:2.3.2',
+      'com.google.errorprone:error_prone_annotations:2.3.3',
+      'commons-logging:commons-logging:1.2',
+      'org.apache.logging.log4j:log4j-api:2.6.2',
+      'org.slf4j:slf4j-api:1.7.21'
+    ]
+  }
+
+  /**
+   * Returns the list of test dependencies.
+   */
+  static List<String> testDependencies() {
+    return [
+      'junit:junit:4.12',
     ]
   }
 
@@ -73,7 +120,7 @@ class GrpcVendoring {
     // those libraries may provide. The 'validateShadedJarDoesntLeakNonOrgApacheBeamClasses'
     // ensures that there are no classes outside of the 'org.apache.beam' namespace.
 
-    String version = "v1p21p0";
+    String version = "v1p26p0";
     String prefix = "org.apache.beam.vendor.grpc.${version}";
     List<String> packagesToRelocate = [
       // guava uses the com.google.common and com.google.thirdparty package namespaces
@@ -81,7 +128,6 @@ class GrpcVendoring {
       "com.google.thirdparty",
       "com.google.protobuf",
       "com.google.gson",
-      "io.grpc",
       "com.google.auth",
       "com.google.api",
       "com.google.cloud",
@@ -89,8 +135,23 @@ class GrpcVendoring {
       "com.google.longrunning",
       "com.google.rpc",
       "com.google.type",
+      "io.grpc",
+      "io.netty",
       "io.opencensus",
-      "io.netty"
+      "io.perfmark",
+      "com.google.protobuf.nano",
+      "com.jcraft",
+      "com.ning",
+      "com.sun",
+      "lzma",
+      "net.jpountz",
+      "org.bouncycastle",
+      "org.cservenak.streams",
+      "org.conscrypt",
+      "org.eclipse.jetty.alpn",
+      "org.eclipse.jetty.npn",
+      "org.jboss.marshalling",
+      "org.jboss.modules"
     ]
 
     return packagesToRelocate.collectEntries {
@@ -108,19 +169,25 @@ class GrpcVendoring {
   /** Returns the list of shading exclusions. */
   static List<String> exclusions() {
     return [
-      // Don't include android annotations, errorprone, checkerframework, JDK8 annotations, objenesis, junit, and mockito in the vendored jar
+      // Don't include android annotations, errorprone, checkerframework, JDK8 annotations, objenesis, junit,
+      // commons-logging, log4j, slf4j and mockito in the vendored jar
       "android/annotation/**/",
       "com/google/errorprone/**",
       "com/google/instrumentation/**",
       "com/google/j2objc/annotations/**",
       "javax/annotation/**",
       "junit/**",
+      "org/apache/commons/logging/**",
+      "org/apache/log/**",
+      "org/apache/log4j/**",
+      "org/apache/logging/log4j/**",
       "org/checkerframework/**",
       "org/codehaus/mojo/animal_sniffer/**",
       "org/hamcrest/**",
       "org/junit/**",
       "org/mockito/**",
       "org/objenesis/**",
+      "org/slf4j/**",
     ]
   }
 
