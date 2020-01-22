@@ -333,6 +333,16 @@ if (project.hasProperty('javaLinkageArtifactIds')) {
   }
 }
 
+import com.github.jk1.license.render.*
+import com.github.jk1.license.filter.*
+
 licenseReport {
-  allowedLicensesFile = new File("$projectDir/dependencies/allowed-licenses.json")
+  outputDir = 'license-report'
+  renderers = [
+          new CsvReportRenderer(),
+          new InventoryHtmlReportRenderer('index.html', 'License Report', new File(projectDir,"$outputDir/unknown-license-details.txt"))]
+  filters = [new LicenseBundleNormalizer(bundlePath: "$projectDir/$outputDir/license-normalizer-bundle.json")]
+  allowedLicensesFile = new File("$projectDir/$outputDir/allowed-licenses.json")
+  excludeOwnGroup = true
 }
+
