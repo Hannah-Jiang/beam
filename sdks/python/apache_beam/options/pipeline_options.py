@@ -633,6 +633,14 @@ class HadoopFileSystemOptions(PipelineOptions):
         '--hdfs_port', default=None, help=('Port of the HDFS namenode.'))
     parser.add_argument(
         '--hdfs_user', default=None, help=('HDFS username to use.'))
+    parser.add_argument(
+        '--hdfs_full_urls',
+        default=False,
+        action='store_true',
+        help=(
+            'If set, URLs will be parsed as "hdfs://server/path/...", instead '
+            'of "hdfs://path/...". The "server" part will be unused (use '
+            '--hdfs_host and --hdfs_port).'))
 
   def validate(self, validator):
     errors = []
@@ -740,6 +748,17 @@ class WorkerOptions(PipelineOptions):
             'worker harness. Default is the container for the version of the '
             'SDK. Note: currently, only approved Google Cloud Dataflow '
             'container images may be used here.'))
+    parser.add_argument(
+        '--sdk_harness_container_image_overrides',
+        action='append',
+        default=None,
+        help=(
+            'Overrides for SDK harness container images. Could be for the '
+            'local SDK or for a remote SDK that pipeline has to support due '
+            'to a cross-language transform. Each entry consist of two values '
+            'separated by a comma where first value gives a regex to '
+            'identify the container image to override and the second value '
+            'gives the replacement container image.'))
     parser.add_argument(
         '--use_public_ips',
         default=None,

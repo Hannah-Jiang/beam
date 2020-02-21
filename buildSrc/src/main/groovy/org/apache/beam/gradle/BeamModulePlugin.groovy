@@ -137,6 +137,11 @@ class BeamModulePlugin implements Plugin<Project> {
      * @see: https://github.com/GoogleCloudPlatform/cloud-opensource-java/blob/master/library-best-practices/JLBP-20.md
      */
     String automaticModuleName = null
+
+    /**
+     * The set of additional maven repositories that should be added into published POM file.
+     */
+    List<Map> mavenRepositories = [];
   }
 
   /** A class defining the set of configurable properties accepted by applyPortabilityNature. */
@@ -373,15 +378,15 @@ class BeamModulePlugin implements Plugin<Project> {
     def generated_grpc_dc_beta_version = "0.29.0-alpha"
     def google_auth_version = "0.19.0"
     def google_clients_version = "1.30.3"
-    def google_cloud_bigdataoss_version = "1.9.16"
+    def google_cloud_bigdataoss_version = "2.0.0"
     def google_cloud_core_version = "1.92.2"
-    def google_cloud_spanner_version = "1.6.0"
+    def google_cloud_spanner_version = "1.49.1"
     def google_http_clients_version = "1.34.0"
     def grpc_version = "1.25.0"
     def guava_version = "25.1-jre"
     def hadoop_version = "2.8.5"
     def hamcrest_version = "2.1"
-    def jackson_version = "2.9.10"
+    def jackson_version = "2.10.2"
     def jaxb_api_version = "2.2.12"
     def kafka_version = "1.0.0"
     def nemo_version = "0.1"
@@ -433,8 +438,8 @@ class BeamModulePlugin implements Plugin<Project> {
         cassandra_driver_mapping                    : "com.datastax.cassandra:cassandra-driver-mapping:$cassandra_driver_version",
         classgraph                                  : "io.github.classgraph:classgraph:$classgraph_version",
         commons_codec                               : "commons-codec:commons-codec:1.14",
-        commons_compress                            : "org.apache.commons:commons-compress:1.19",
-        commons_csv                                 : "org.apache.commons:commons-csv:1.7",
+        commons_compress                            : "org.apache.commons:commons-compress:1.20",
+        commons_csv                                 : "org.apache.commons:commons-csv:1.8",
         commons_io                                  : "commons-io:commons-io:2.6",
         commons_lang3                               : "org.apache.commons:commons-lang3:3.9",
         commons_math3                               : "org.apache.commons:commons-math3:3.6.1",
@@ -497,7 +502,7 @@ class BeamModulePlugin implements Plugin<Project> {
         jackson_datatype_joda                       : "com.fasterxml.jackson.datatype:jackson-datatype-joda:$jackson_version",
         jackson_module_scala                        : "com.fasterxml.jackson.module:jackson-module-scala_2.11:$jackson_version",
         jaxb_api                                    : "javax.xml.bind:jaxb-api:$jaxb_api_version",
-        joda_time                                   : "joda-time:joda-time:2.10.3",
+        joda_time                                   : "joda-time:joda-time:2.10.5",
         jsonassert                                  : "org.skyscreamer:jsonassert:1.5.0",
         jsr305                                      : "com.google.code.findbugs:jsr305:3.0.2",
         junit                                       : "junit:junit:4.13-beta-3",
@@ -1142,6 +1147,17 @@ class BeamModulePlugin implements Plugin<Project> {
 
               pom.withXml {
                 def root = asNode()
+
+                // Add "repositories" section if it was configured
+                if (configuration.mavenRepositories && configuration.mavenRepositories.size() > 0) {
+                  def repositoriesNode = root.appendNode('repositories')
+                  configuration.mavenRepositories.each {
+                    def repositoryNode = repositoriesNode.appendNode('repository')
+                    repositoryNode.appendNode('id', it.get('id'))
+                    repositoryNode.appendNode('url', it.get('url'))
+                  }
+                }
+
                 def dependenciesNode = root.appendNode('dependencies')
                 def generateDependenciesFromConfiguration = { param ->
                   project.configurations."${param.configuration}".allDependencies.each {
@@ -1626,7 +1642,8 @@ class BeamModulePlugin implements Plugin<Project> {
       def beamTestPipelineOptions = [
         "--runner=org.apache.beam.runners.portability.testing.TestPortableRunner",
         "--jobServerDriver=${config.jobServerDriver}",
-        "--environmentCacheMillis=10000"
+        "--environmentCacheMillis=10000",
+        "--experiments=beam_fn_api",
       ]
       beamTestPipelineOptions.addAll(config.pipelineOpts)
       if (config.environment == PortableValidatesRunnerConfiguration.Environment.EMBEDDED) {
@@ -1707,7 +1724,8 @@ class BeamModulePlugin implements Plugin<Project> {
       def beamJavaTestPipelineOptions = [
         "--runner=PortableRunner",
         "--jobEndpoint=${config.jobEndpoint}",
-        "--environmentCacheMillis=10000"
+        "--environmentCacheMillis=10000",
+        "--experiments=beam_fn_api",
       ]
       beamJavaTestPipelineOptions.addAll(config.pipelineOpts)
       ['Java': javaPort, 'Python': pythonPort].each { sdk, port ->
