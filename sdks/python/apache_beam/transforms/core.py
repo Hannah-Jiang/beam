@@ -514,15 +514,18 @@ class _BundleFinalizerParam(_DoFnParam):
         _LOGGER.warning("Got exception from finalization call: %s", e)
 
   def has_callbacks(self):
+    # type: () -> bool
     return len(self._callbacks) > 0
 
   def reset(self):
+    # type: () -> None
     del self._callbacks[:]
 
 
 class _WatermarkEstimatorParam(_DoFnParam):
   """WatermarkEstomator DoFn parameter."""
   def __init__(self, watermark_estimator_provider):
+    # type: (WatermarkEstimatorProvider) -> None
     if not isinstance(watermark_estimator_provider, WatermarkEstimatorProvider):
       raise ValueError(
           'DoFn._WatermarkEstimatorParam expected'
@@ -1339,7 +1342,7 @@ class ParDo(PTransformWithSideInputs):
   @staticmethod
   @PTransform.register_urn(
       common_urns.primitives.PAR_DO.urn, beam_runner_api_pb2.ParDoPayload)
-  def from_runner_api_parameter(pardo_payload, context):
+  def from_runner_api_parameter(unused_ptransform, pardo_payload, context):
     assert pardo_payload.do_fn.urn == python_urns.PICKLED_DOFN_INFO
     fn, args, kwargs, si_tags_and_types, windowing = pickler.loads(
         pardo_payload.do_fn.payload)
@@ -1932,7 +1935,7 @@ class CombinePerKey(PTransformWithSideInputs):
   @PTransform.register_urn(
       common_urns.composites.COMBINE_PER_KEY.urn,
       beam_runner_api_pb2.CombinePayload)
-  def from_runner_api_parameter(combine_payload, context):
+  def from_runner_api_parameter(unused_ptransform, combine_payload, context):
     return CombinePerKey(
         CombineFn.from_runner_api(combine_payload.combine_fn, context))
 
@@ -1975,7 +1978,7 @@ class CombineValues(PTransformWithSideInputs):
   @PTransform.register_urn(
       common_urns.combine_components.COMBINE_GROUPED_VALUES.urn,
       beam_runner_api_pb2.CombinePayload)
-  def from_runner_api_parameter(combine_payload, context):
+  def from_runner_api_parameter(unused_ptransform, combine_payload, context):
     return CombineValues(
         CombineFn.from_runner_api(combine_payload.combine_fn, context))
 
@@ -2168,9 +2171,11 @@ class GroupByKey(PTransform):
       reify_output_type = typehints.KV[
           key_type, typehints.WindowedValue[value_type]]  # type: ignore[misc]
       gbk_input_type = (
-          typehints.KV[key_type,
-                       typehints.Iterable[typehints.WindowedValue[value_type]]]
-      )  # type: ignore[misc]
+          typehints.
+          KV[key_type,
+             typehints.Iterable[
+                 typehints.WindowedValue[  # type: ignore[misc]
+                     value_type]]])
       gbk_output_type = typehints.KV[key_type, typehints.Iterable[value_type]]
 
       # pylint: disable=bad-continuation
@@ -2203,7 +2208,8 @@ class GroupByKey(PTransform):
 
   @staticmethod
   @PTransform.register_urn(common_urns.primitives.GROUP_BY_KEY.urn, None)
-  def from_runner_api_parameter(unused_payload, unused_context):
+  def from_runner_api_parameter(
+      unused_ptransform, unused_payload, unused_context):
     return GroupByKey()
 
   def runner_api_requires_keyed_input(self):
@@ -2303,8 +2309,8 @@ class Windowing(object):
   def __init__(self,
                windowfn,  # type: WindowFn
                triggerfn=None,  # type: typing.Optional[TriggerFn]
-               accumulation_mode=None,  # type: typing.Optional[beam_runner_api_pb2.AccumulationMode]
-               timestamp_combiner=None,  # type: typing.Optional[beam_runner_api_pb2.OutputTime]
+               accumulation_mode=None,  # type: typing.Optional[beam_runner_api_pb2.AccumulationMode.Enum]
+               timestamp_combiner=None,  # type: typing.Optional[beam_runner_api_pb2.OutputTime.Enum]
                allowed_lateness=0, # type: typing.Union[int, float]
                ):
     """Class representing the window strategy.
@@ -2494,7 +2500,7 @@ class WindowInto(ParDo):
         self.windowing.to_runner_api(context))
 
   @staticmethod
-  def from_runner_api_parameter(proto, context):
+  def from_runner_api_parameter(unused_ptransform, proto, context):
     windowing = Windowing.from_runner_api(proto, context)
     return WindowInto(
         windowing.windowfn,
@@ -2568,7 +2574,8 @@ class Flatten(PTransform):
     return common_urns.primitives.FLATTEN.urn, None
 
   @staticmethod
-  def from_runner_api_parameter(unused_parameter, unused_context):
+  def from_runner_api_parameter(
+      unused_ptransform, unused_parameter, unused_context):
     return Flatten()
 
 
@@ -2681,5 +2688,6 @@ class Impulse(PTransform):
 
   @staticmethod
   @PTransform.register_urn(common_urns.primitives.IMPULSE.urn, None)
-  def from_runner_api_parameter(unused_parameter, unused_context):
+  def from_runner_api_parameter(
+      unused_ptransform, unused_parameter, unused_context):
     return Impulse()

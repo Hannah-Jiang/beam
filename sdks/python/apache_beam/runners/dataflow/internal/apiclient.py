@@ -128,11 +128,9 @@ class Step(object):
     if tag is None or len(outputs) == 1:
       return outputs[0]
     else:
-      name = '%s_%s' % (PropertyNames.OUT, tag)
-      if name not in outputs:
-        raise ValueError(
-            'Cannot find named output: %s in %s.' % (name, outputs))
-      return name
+      if tag not in outputs:
+        raise ValueError('Cannot find named output: %s in %s.' % (tag, outputs))
+      return tag
 
 
 class Environment(object):
@@ -197,10 +195,14 @@ class Environment(object):
     ])
     # TODO: Use enumerated type instead of strings for job types.
     if job_type.startswith('FNAPI_'):
-      self.debug_options = self.debug_options or DebugOptions()
       self.debug_options.experiments = self.debug_options.experiments or []
-      if not self.debug_options.lookup_experiment(
-          'runner_harness_container_image'):
+      if self.debug_options.lookup_experiment(
+          'runner_harness_container_image') or _use_unified_worker(options):
+        # Default image is not used if user provides a runner harness image.
+        # Default runner harness image is selected by the service for unified
+        # worker.
+        pass
+      else:
         runner_harness_override = (get_runner_harness_container_image())
         if runner_harness_override:
           self.debug_options.add_experiment(
@@ -650,9 +652,9 @@ class DataflowApplicationClient(object):
         'A template was just created at location %s', template_location)
     return None
 
-  def _apply_sdk_environment_overrides(self, proto_pipeline):
+  @staticmethod
+  def _apply_sdk_environment_overrides(proto_pipeline, sdk_overrides):
     # Update environments based on user provided overrides
-    sdk_overrides = self._sdk_image_overrides
     if sdk_overrides:
       for environment in proto_pipeline.components.environments.values():
         docker_payload = proto_utils.parse_Bytes(
@@ -665,7 +667,8 @@ class DataflowApplicationClient(object):
 
   def create_job_description(self, job):
     """Creates a job described by the workflow proto."""
-    self._apply_sdk_environment_overrides(job.proto_pipeline)
+    DataflowApplicationClient._apply_sdk_environment_overrides(
+        job.proto_pipeline, self._sdk_image_overrides)
 
     # Stage proto pipeline.
     self.stage_file(
@@ -724,8 +727,7 @@ class DataflowApplicationClient(object):
     _LOGGER.info('Created job with id: [%s]', response.id)
     _LOGGER.info(
         'To access the Dataflow monitoring console, please navigate to '
-        'https://console.cloud.google.com/dataflow/jobsDetail'
-        '/locations/%s/jobs/%s?project=%s',
+        'https://console.cloud.google.com/dataflow/jobs/%s/%s?project=%s',
         self.google_cloud_options.region,
         response.id,
         self.google_cloud_options.project)
@@ -1006,6 +1008,9 @@ def _use_unified_worker(pipeline_options):
   debug_options = pipeline_options.view_as(DebugOptions)
   use_unified_worker_flag = 'use_unified_worker'
 
+  if debug_options.lookup_experiment(use_unified_worker_flag):
+    return debug_options.lookup_experiment(use_unified_worker_flag)
+
   if debug_options.lookup_experiment('use_runner_v2'):
     debug_options.add_experiment(use_unified_worker_flag)
 
@@ -1039,9 +1044,10 @@ def get_container_image_from_options(
   if worker_options.worker_harness_container_image:
     return worker_options.worker_harness_container_image
   elif external_image_to_override:
-    raise NotImplementedError(
+    _LOGGER.warning(
         'Add support for determining container images for external SDKs '
         'without user overrides')
+    return external_image_to_override
 
   if sys.version_info[0] == 2:
     version_suffix = ''
