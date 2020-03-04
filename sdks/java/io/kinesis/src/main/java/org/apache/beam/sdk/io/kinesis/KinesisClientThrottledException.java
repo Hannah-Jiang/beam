@@ -15,31 +15,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+package org.apache.beam.sdk.io.kinesis;
 
-import CommonJobProperties as commonJobProperties
+import com.amazonaws.AmazonClientException;
 
-job('beam_Prober_CommunityMetrics') {
-  description('Health check probes for the Community Metrics infrastructure')
- commonJobProperties.setTopLevelMainJobProperties(delegate)
+/** Thrown when the Kinesis client was throttled due to rate limits. */
+class KinesisClientThrottledException extends TransientKinesisException {
 
- commonJobProperties.enablePhraseTriggeringFromPullRequest(delegate,
-     'Community Metrics Prober',
-     'Run Community Metrics Prober')
-
- commonJobProperties.setAutoJob(delegate)
-
- commonJobProperties.enablePhraseTriggeringFromPullRequest(
-         delegate,
-         'Community Metrics Prober',
-         'Run Community Metrics Prober')
-
-  // Gradle goals for this job.
-  steps {
-    gradle {
-      rootBuildScriptDir(commonJobProperties.checkoutDir)
-      tasks(':communityMetricsProber')
-      switches('--rerun-tasks')
-      commonJobProperties.setGradleSwitches(delegate)
-    }
+  public KinesisClientThrottledException(String s, AmazonClientException e) {
+    super(s, e);
   }
 }
