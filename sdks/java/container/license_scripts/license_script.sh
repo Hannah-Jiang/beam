@@ -50,4 +50,5 @@ else
   touch sdks/java/container/third_party_licenses/empty
 fi
 rm -rf java_third_party_licenses
+rm -rf sdks/java/container/third_party_licenses
 echo "Finished license_scripts.sh"
